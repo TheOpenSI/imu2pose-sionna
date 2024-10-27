@@ -37,14 +37,15 @@ def render_scene(scene, paths=None, coverage_map=None):
     canvas.show()
     canvas.app.run()
 
-def configure_antennas(scene, scene_name, num_tx_ant=8, num_rx_ant=1, position_tx=None, position_rx=None):
+def configure_antennas(scene, scene_name, num_tx_ant=8, num_rx_ant=4, position_tx=None, position_rx=None):
     # Configure antenna array for all transmitters
-    scene.tx_array = PlanarArray(num_rows=1, num_cols=int(num_tx_ant/2), vertical_spacing=0.5,
-                                 horizontal_spacing=0.5, pattern='tr38901', polarization='VH'
+    # Note that the role of tx (user) and rx (base station) can be swapped
+    scene.tx_array = PlanarArray(num_rows=1, num_cols=int(num_rx_ant/2), vertical_spacing=0.5,
+                                 horizontal_spacing=0.5, pattern='tr38901', polarization='cross'
                                  )
     # configure antenna array for all receivers
-    scene.rx_array = PlanarArray(num_rows=1, num_cols=num_rx_ant, vertical_spacing=0.5,
-                                 horizontal_spacing=0.5, pattern='dipole', polarization='V'
+    scene.rx_array = PlanarArray(num_rows=1, num_cols=int(num_tx_ant/2), vertical_spacing=0.5,
+                                 horizontal_spacing=0.5, pattern='iso', polarization='cross'
                                  )
 
     print('Number of TX antennas: {}'.format(scene.tx_array.num_ant))
@@ -316,7 +317,6 @@ def test_sionna_functions():
     plot_h_freq(h_freq)
     plot_time_series_waveform_for_one_time_step(h_freq, 0)
     inspect_paths(scene, paths, path_idx=1)
-    # customized_channel(paths, True)
 
 
 if __name__ == '__main__':

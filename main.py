@@ -1,17 +1,27 @@
 import os
 import numpy as np
 import tensorflow as tf
+from sionna.rt import PlanarArray, Receiver
 from sionna.mimo import StreamManagement
 from sionna.mimo.precoding import normalize_precoding_power, grid_of_beams_dft
 from sionna.ofdm import (ResourceGrid, ResourceGridMapper, LSChannelEstimator, RemoveNulledSubcarriers,
                          LMMSEEqualizer, ZFPrecoder)
 from sionna.mapping import Mapper, Demapper
-from sionna.channel import CIRDataset, cir_to_ofdm_channel, subcarrier_frequencies, ApplyOFDMChannel
+from sionna.channel import CIRDataset, cir_to_ofdm_channel, subcarrier_frequencies, ApplyOFDMChannel, OFDMChannel
 from sionna.utils import compute_ber, ebnodb2no
 from utils.sionna_functions import (load_3d_map, configure_antennas, configure_radio_material,
                                     plot_h_freq, render_scene, plot_cir, plot_estimated_channel)
 from utils.imu_functions import pre_processing_imu, imu_to_binary, binary_to_imu, numpy_to_tensorflow_source
 
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+    except RuntimeError as e:
+        print(e)
+# Avoid warnings from TensorFlow
+tf.get_logger().setLevel('ERROR')
 tf.random.set_seed(1)
 
 # Class from https://nvlabs.github.io/sionna/examples/Sionna_Ray_Tracing_Introduction.html#BER-Evaluation
@@ -88,6 +98,111 @@ class CIRGenerator:
 
             yield a, tau
 
+def generate_channel_impulse_responses(scene, num_cirs, batch_size_cir, rg, num_tx_ant, uplink=True, save=True):
+    max_depth = 5
+    min_gain_db = -130  # in dB / ignore any position with less than -130 dB path gain
+    max_gain_db = 0  # in dB / ignore any position with more than 0 dB path gain
+    # Sample points within a 10-400m radius around the transmitter
+    min_dist = 10  # in m
+    max_dist = 400  # in m
+
+    if save:
+        # Update coverage map
+        print('Update coverage map ...')
+        cm = scene.coverage_map(max_depth=max_depth, diffraction=True, cm_cell_size=(1.0, 1.0), combining_vec=None,
+                                precoding_vec=None, num_samples=int(1e6)
+                                )
+
+        scene.remove("rx")
+
+        # Configure antenna array for all receivers (=UEs)
+        scene.rx_array = PlanarArray(num_rows=1, num_cols=int(num_tx_ant/2), vertical_spacing=0.5,
+                                     horizontal_spacing=0.5, pattern='iso', polarization='cross'
+                                     )
+        # TODO: update orientation and height of the rx_array based on the IMU attached on the user head
+        # Create batch_size receivers
+        # sample batch_size random user positions from coverage map
+        print('Update user positions ... ')
+        ue_pos, _ = cm.sample_positions(num_pos=batch_size_cir,
+                                        metric="path_gain",
+                                        min_val_db=min_gain_db,
+                                        max_val_db=max_gain_db,
+                                        min_dist=min_dist,
+                                        max_dist=max_dist)
+        ue_pos = tf.squeeze(ue_pos)
+        for i in range(batch_size_cir):
+            rx = Receiver(name=f"rx-{i}",
+                          position=ue_pos[i],  # Random position sampled from coverage map
+                          )
+            scene.add(rx)
+
+        print('Generating batches of CIRs (a, tau): ...')
+        a, tau = None, None
+        num_runs = int(np.ceil(num_cirs / batch_size_cir))
+
+        # loop for creating random batch of a and tau
+        for idx in range(num_runs):
+            print('Progress: {}/{}'.format(idx, num_runs), end='\r')
+            # Sample random user positions
+            ue_pos, _ = cm.sample_positions(
+                num_pos=batch_size_cir,
+                metric="path_gain",
+                min_val_db=min_gain_db,
+                max_val_db=max_gain_db,
+                min_dist=min_dist,
+                max_dist=max_dist
+            )
+            ue_pos = tf.squeeze(ue_pos)
+
+            # Update all receiver positions
+            for i in range(batch_size_cir):
+                scene.receivers[f"rx-{idx}"].position = ue_pos[idx]
+
+            # Simulate CIR
+            paths = scene.compute_paths(
+                max_depth=max_depth,
+                diffraction=True,
+                num_samples=1e6
+            )  # shared between all tx in a scene
+
+            # Transform paths into channel impulse responses
+            paths.reverse_direction = uplink  # Convert to uplink direction
+            paths.apply_doppler(sampling_frequency=rg.subcarrier_spacing,
+                                num_time_steps=rg.num_ofdm_symbols,
+                                tx_velocities=[3., 3., 0],
+                                rx_velocities=[0., 0., 0])
+
+            # We fix here the maximum number of paths to 75 which ensures
+            # that we can simply concatenate different channel impulse reponses
+            a_, tau_ = paths.cir(num_paths=75)
+            del paths  # Free memory
+
+            if a is None:
+                a = a_.numpy()
+                tau = tau_.numpy()
+            else:
+                # Concatenate along the num_tx dimension
+                a = np.concatenate([a, a_], axis=3)
+                tau = np.concatenate([tau, tau_], axis=2)
+
+        # Exchange the num_tx and batchsize dimensions
+        a = np.transpose(a, [3, 1, 2, 0, 4, 5, 6])
+        tau = np.transpose(tau, [2, 1, 0, 3])
+
+        # Remove CIRs that have no active link (i.e., a is all-zero)
+        p_link = np.sum(np.abs(a) ** 2, axis=(1, 2, 3, 4, 5, 6))
+        a = a[p_link > 0., ...]
+        tau = tau[p_link > 0., ...]
+
+        np.save('data/a_dataset.npy', a)
+        np.save('data/tau_dataset.npy', tau)
+    else:
+        a = np.load('data/a_dataset.npy')
+        tau = np.load('data/tau_dataset.npy')
+
+    return a, tau
+
+
 def generate_channel_batch(scene, batch_size, num_paths, rg, sampling_frequency, frequencies, save=True):
     # Generating batch_size channel frequency responses
     a, tau = [], []
@@ -126,12 +241,13 @@ def configure_links(scene, num_tx, num_rx):
     :return: transmitter, receiver, channel
     """
     # OFDM resource grid configuration
-    num_ut_ant = scene.rx_array.num_ant
-    num_bs_ant = scene.tx_array.num_ant
-    num_streams_per_tx = num_ut_ant
+    num_ut_ant = scene.tx_array.num_ant
+    num_bs_ant = scene.rx_array.num_ant
+    num_streams_per_tx = 1  # TODO: what is the best value here?
 
     # Stream management between tx and rx
-    rx_tx_association = np.array([[1]])
+    # rx_tx_association = np.array([[1]])
+    rx_tx_association = np.ones([num_rx, num_tx], bool)
     sm = StreamManagement(rx_tx_association, num_streams_per_tx)
 
     # Resource grid configuration
@@ -188,23 +304,25 @@ def prepare_source_data(shape, quantization_level):
 
     return b, imu
 
-def uplink_transmission():
+def uplink_transmission(num_tx=1, generate_data=True):
     # Configure scene and antennas
-    num_tx = 1
-    num_rx = 1
-    num_tx_ant = 8
-    num_rx_ant = 1
+    # num_tx = 1  # user
+    num_tx_ant = 4
+    num_rx = 1  # base station
+    num_rx_ant = 16
     scene, scene_name = load_3d_map(map_name='etoile', render=False)
     scene = configure_antennas(scene, scene_name, num_tx_ant=num_tx_ant, num_rx_ant=num_rx_ant)
     scene = configure_radio_material(scene)
     sample_paths = scene.compute_paths(max_depth=5, num_samples=1e6)
     render_scene(scene, paths=sample_paths)
 
+    del sample_paths
+
     # Initialize configurations for source coding
-    imu_seq_len = 10  # number of IMU data samples to be transmitted
+    imu_seq_len = 1  # number of IMU data samples to be transmitted
     batch_size = 204 * imu_seq_len
     quantization_level = 2 ** 7
-    uplink_direction = False  # Reverse direction for uplink transmission
+    uplink_direction = True  # Reverse direction for uplink transmission
     perfect_csi = False
     precoding = True
 
@@ -216,9 +334,24 @@ def uplink_transmission():
     sampling_frequency = 15e3
     num_paths = 75
     frequencies = subcarrier_frequencies(rg.fft_size, rg.subcarrier_spacing)
-    h_freq = generate_channel_batch(scene, batch_size, num_paths, rg, sampling_frequency, frequencies, save=False)
-    print('h_freq.shape: {}'.format(h_freq.shape))
-    channel_freq = ApplyOFDMChannel(add_awgn=True)
+    a, tau = generate_channel_impulse_responses(
+        scene, 500, 50, rg, num_tx_ant, uplink_direction, generate_data
+    )
+    print('a.shape: {}'.format(a.shape))
+    print('tau.shape: {}'.format(tau.shape))
+    # a = np.transpose(a, [0, 1, 4, 3, 2, 5, 6])
+
+    cir_generator = CIRGenerator(a, tau, num_tx, True)
+    channel_model = CIRDataset(cir_generator, batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant,
+                               num_paths, rg.num_ofdm_symbols
+                               )
+
+    channel_freq = OFDMChannel(channel_model, rg, normalize_channel=True, return_channel=True)
+    del a, tau, scene
+
+    # h_freq = generate_channel_batch(scene, batch_size, num_paths, rg, sampling_frequency, frequencies, save=False)
+    # print('h_freq.shape: {}'.format(h_freq.shape))
+    # channel_freq = ApplyOFDMChannel(add_awgn=True)
 
     # Start transmission
     num_bits_per_symbols = 2
@@ -229,10 +362,14 @@ def uplink_transmission():
     # with quantization_level bits.
     # Define number of information bits per OFDM resource grid with 2 pilot slots, fft_size=48, num_tx=1
     k = int(rg.num_data_symbols * num_bits_per_symbols)
-    data_shape = (batch_size, 1, rg.num_streams_per_tx, k)
+    data_shape = (batch_size, num_tx, rg.num_streams_per_tx, k)
     print('Desired TX data shape: {}'.format(data_shape))
     b, imu = prepare_source_data(shape=data_shape, quantization_level=quantization_level)
+    imu_shape = imu.shape
     print('b.shape: {}'.format(b.shape))
+    print('imu.shape: {}'.format(imu.shape))
+    del imu
+
     x = mapper(b)
     print('x.shape: {}'.format(x.shape))
     x_rg = rg_mapper(x)
@@ -240,9 +377,9 @@ def uplink_transmission():
 
     # Precoding for downlink transmission
     g = None
-    if not uplink_direction:
-        x_rg, g = zf_precoder([x_rg, h_freq])
-    y = channel_freq([x_rg, h_freq, no])  # (b, 1, 1, 14, 48)
+    # if not uplink_direction:
+    #     x_rg, g = zf_precoder([x_rg, h_freq])
+    y, h_freq = channel_freq([x_rg, no])  # (b, 1, 1, 14, 48)
     print('y.shape: {}'.format(y.shape))
 
     # Decode and channel estimation
@@ -273,7 +410,7 @@ def uplink_transmission():
     # Recover original IMU data
     b_hat_flat = tf.cast(tf.reshape(b_hat, [-1]), dtype=tf.int8).numpy()
     print('b_hat_flat.shape: {}'.format(b_hat_flat.shape))
-    recovered_data = binary_to_imu(b_hat_flat, quantization_level, imu.shape, -1.0, 1.0)
+    recovered_data = binary_to_imu(b_hat_flat, quantization_level, imu_shape, -1.0, 1.0)
     print('recovered_data.shape: {}, {}'.format(recovered_data.shape, recovered_data.dtype))
     rec_flat_len = np.prod(recovered_data.shape)
     recovered_imu_seq = np.reshape(recovered_data, (int(rec_flat_len/204), 204))
@@ -281,4 +418,11 @@ def uplink_transmission():
 
 
 if __name__ == '__main__':
-    uplink_transmission()
+    import argparse
+    # Parse parameters
+    parser = argparse.ArgumentParser(description='Main script')
+    parser.add_argument('--num_tx', type=int, help='Number of transmitters (UEs)', default=1)
+    parser.add_argument('--gen_data', type=int, help='Number of receivers (UEs)', default=0)
+    args = parser.parse_args()
+
+    uplink_transmission(args.num_tx, bool(args.gen_data))

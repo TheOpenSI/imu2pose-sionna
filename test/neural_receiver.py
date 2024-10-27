@@ -195,7 +195,7 @@ def train_neural_receiver(ofdm_params, n_bits, mapper, resource_grid, channel, u
         pickle.dump(weights, f)
 
 def test_neural_receiver(ofdm_params, n_bits, mapper, resource_grid, channel, ut_ant, bs_ant, stream_manager):
-    model = E2ESystem(system='baseline-perfect-csi', ofdm_params=ofdm_params, n_bits=n_bits,
+    model = E2ESystem(system='neural-receiver', ofdm_params=ofdm_params, n_bits=n_bits,
                       mapper=mapper, resource_grid=resource_grid, channel=channel,
                       ut_ant=ut_ant, bs_ant=bs_ant, stream_manager=stream_manager
                       )
@@ -216,9 +216,35 @@ def test_neural_receiver(ofdm_params, n_bits, mapper, resource_grid, channel, ut
     _, bler = sim_ber(model, ebno_dbs, batch_size=128, num_target_block_errors=100, max_mc_iter=100)
     BLER['neural-receiver'] = bler.numpy()
 
-    model = E2ESystem('baseline-ls-estimation')
+    model = E2ESystem('baseline-ls-estimation', ofdm_params=ofdm_params, n_bits=n_bits,
+                      mapper=mapper, resource_grid=resource_grid, channel=channel,
+                      ut_ant=ut_ant, bs_ant=bs_ant, stream_manager=stream_manager
+                      )
     _, bler = sim_ber(model, ebno_dbs, batch_size=128, num_target_block_errors=100, max_mc_iter=100)
     BLER['baseline-ls-estimation'] = bler.numpy()
+
+    model = E2ESystem('baseline-perfect-csi', ofdm_params=ofdm_params, n_bits=n_bits,
+                      mapper=mapper, resource_grid=resource_grid, channel=channel,
+                      ut_ant=ut_ant, bs_ant=bs_ant, stream_manager=stream_manager
+                      )
+    _, bler = sim_ber(model, ebno_dbs, batch_size=128, num_target_block_errors=100, max_mc_iter=100)
+    BLER['baseline-perfect-csi'] = bler.numpy()
+
+    plt.figure(figsize=(10, 6))
+    # Baseline - Perfect CSI
+    plt.semilogy(ebno_dbs, BLER['baseline-perfect-csi'], 'o-', c=f'C0', label=f'Baseline - Perfect CSI')
+    # Baseline - LS Estimation
+    plt.semilogy(ebno_dbs, BLER['baseline-ls-estimation'], 'x--', c=f'C1', label=f'Baseline - LS Estimation')
+    # Neural receiver
+    plt.semilogy(ebno_dbs, BLER['neural-receiver'], 's-.', c=f'C2', label=f'Neural receiver')
+    #
+    plt.xlabel(r"$E_b/N_0$ (dB)")
+    plt.ylabel("BLER")
+    plt.grid(which="both")
+    plt.ylim((1e-4, 1.0))
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
 
 
 class ResidualBlock(Layer):
@@ -487,5 +513,6 @@ if __name__ == '__main__':
     (ut_ant, bs_ant, binary_source, n, sm, rg, mapper, rg_mapper,
      channel, neural_receiver, rg_demapper) = link_config(system_params)
     step_forward(system_params, binary_source, n, mapper, rg_mapper, channel, neural_receiver)
-    train_neural_receiver(system_params, n, mapper, rg, channel, ut_ant, bs_ant, sm)
+    # train_neural_receiver(system_params, n, mapper, rg, channel, ut_ant, bs_ant, sm)
+    test_neural_receiver(system_params, n, mapper, rg, channel, ut_ant, bs_ant, sm)
 
