@@ -14,5 +14,8 @@ pip install -r requirements.txt
 - [x] Neural-receiver (uplink)
 - [ ] Downlink beamforming 
 - [ ] Deep learning-based channel estimator (at base station)
-- [ ] Human body visualization with `smpl`
+- [x] Human body visualization with `smpl`
 - [ ] Human body within 3D map 
+
+### To-do
+- [ ] Fixing Perfect-CSI baseline

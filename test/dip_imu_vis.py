@@ -36,7 +36,7 @@ if __name__ == "__main__":
     print('acc: {}'.format(acc.shape))
     print('poses: {}'.format(poses.shape))
     print('acc lwrist: {}'.format(acc[:, 13, :].shape))
-    np.save('../data/imu_reading.npy', acc[:, 13, :])
+    # np.save('/data/imu_reading.npy', acc[:, 13, :])
 
     # Subject 6 is female, all others are male (cf. metadata.txt included in the downloaded zip file).
     gender = "male"

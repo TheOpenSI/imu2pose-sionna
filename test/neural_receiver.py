@@ -513,6 +513,6 @@ if __name__ == '__main__':
     (ut_ant, bs_ant, binary_source, n, sm, rg, mapper, rg_mapper,
      channel, neural_receiver, rg_demapper) = link_config(system_params)
     step_forward(system_params, binary_source, n, mapper, rg_mapper, channel, neural_receiver)
-    # train_neural_receiver(system_params, n, mapper, rg, channel, ut_ant, bs_ant, sm)
+    train_neural_receiver(system_params, n, mapper, rg, channel, ut_ant, bs_ant, sm)
     test_neural_receiver(system_params, n, mapper, rg, channel, ut_ant, bs_ant, sm)
 

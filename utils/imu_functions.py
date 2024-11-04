@@ -99,7 +99,7 @@ def binary_to_imu(binary_sequence, quantization_level, original_shape, data_min,
     """
     # Determine the number of bits used per quantized value
     bits_per_value = int(np.ceil(np.log2(quantization_level)))
-    print('bits_per_value: {}'.format(bits_per_value))
+    # print('bits_per_value: {}'.format(bits_per_value))
 
     # Ensure the binary sequence is a string, or convert a numpy array of bits to a string
     if isinstance(binary_sequence, np.ndarray):
