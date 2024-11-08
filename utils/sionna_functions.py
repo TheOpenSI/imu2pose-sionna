@@ -66,7 +66,7 @@ def configure_antennas(scene, scene_name, num_tx_ant=8, num_rx_ant=4, position_t
     scene.add(tx)
 
     # create receiver
-    rx = Receiver(name='rx', position=position_rx, orientation=[0, 0, 0])
+    rx = Receiver(name='rx', position=position_rx)
     scene.add(rx)
     tx.look_at(rx)
 
