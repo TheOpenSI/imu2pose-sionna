@@ -4,7 +4,7 @@ import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
 from tensorflow.keras.layers import Layer
-from sionna.rt import PlanarArray, Receiver
+from sionna.rt import PlanarArray, Receiver, Camera
 from sionna.mimo import StreamManagement
 from sionna.mimo.precoding import normalize_precoding_power, grid_of_beams_dft
 from sionna.ofdm import (ResourceGrid, ResourceGridMapper, LSChannelEstimator, RemoveNulledSubcarriers,
@@ -18,32 +18,27 @@ from utils.imu_functions import pre_processing_imu, imu_to_binary, binary_to_imu
 from neural_receiver import E2ESystem
 
 # tf.random.set_seed(1)
-import matplotlib
-matplotlib.use('QtAgg')
 
 def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
     # End-to-end model
     ofdm_params = {
-        # By default, Sionna uses TX to represents base station (with power_tx functions) 
-        # and RX to represents UEs which can be randomly sampled with a coverage map.
-        # For uplink transmission, just be careful with the order of TX-RX in ray tracing
         'num_rx_ant': 16,  # base station
-        'num_tx_ant': 4,  # user's antenna
-        'num_tx': 4,  # number of UEs
+        'num_tx_ant': 1,  # user's antenna - single Vertical antenna
+        'num_tx': 1,  # number of UEs
         'num_rx': 1, 
         'carrier_frequency': 3.5e9,  # Hz
         'delay_spread': 100e-9,  # s
         'speed': 10.0,  # Speed for evaluation and training [m/s]
         'ebno_db_min': -5.0,  # SNR range for evaluation and training [dB]
-        'ebno_db_max': 10.0,
-        'subcarrier_spacing': 15e3,  # Hz - OFDM waveform configuration
+        'ebno_db_max': 20.0,
+        'subcarrier_spacing': 30e3,  # Hz - OFDM waveform configuration
         'fft_size': 76,  # No of subcarriers in the resource grid, including the null-subcarrier and the guard bands
         'num_ofdm_symbols': 14,  # Number of OFDM symbols forming the resource grid
         'dc_null': True,  # Null the DC subcarrier
         'num_guard_carriers': [5, 6],  # Number of guard carriers on each side
         'pilot_pattern': "kronecker",  # Pilot pattern
         'pilot_ofdm_symbol_indices': [2, 11],  # Index of OFDM symbols carrying pilots
-        'cyclic_prefix_length': 6,  # Simulation in frequency domain. This is useless
+        'cyclic_prefix_length': 0,  # Simulation in frequency domain. This is useless
         'num_bits_per_symbol': 2,  # Modulation and coding configuration
     }
     
@@ -57,10 +52,14 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
     # Create scene with transmitters/receivers
     scene, scene_name = load_3d_map(map_name='etoile', render=False)
     scene = configure_antennas(scene, scene_name, num_tx_ant=ofdm_params['num_tx_ant'], num_rx_ant=ofdm_params['num_rx_ant'])
-    # if gen_data:
-    #     sample_paths = scene.compute_paths(max_depth=5, num_samples=1e6)
-    #     render_scene(scene, paths=sample_paths)
-    #     del sample_paths
+    if gen_data:
+        print('Generating channel dataset and 3D map ...')
+        my_cam = Camera("my_cam", position=[-350, 250, 350], look_at=[-20,0,0])
+        scene.add(my_cam)
+        sample_paths = scene.compute_paths(max_depth=5, num_samples=1e6)
+        scene.render_to_file("my_cam", paths=sample_paths, show_devices=True, show_paths=True, resolution=[650, 500], filename='data/scene.png')
+        # render_scene(scene, paths=sample_paths)
+        del sample_paths
 
     model = E2ESystem('neural-receiver', ofdm_params, model_params, scene, eval_mode=eval_mode, gen_data=gen_data)
     optimizer = tf.keras.optimizers.legacy.Adam()
@@ -102,22 +101,22 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
             
             BLER = {}
             
-            model = E2ESystem('baseline-perfect-csi', ofdm_params, model_params, scene, eval_mode=eval_mode, gen_data=False)
-            _, bler = sim_ber(model, ebno_dbs, batch_size=model_params['batch_size'], num_target_block_errors=100, max_mc_iter=100, early_stop=True)
-            BLER['baseline-perfect-csi'] = bler.numpy()
-        
-            model = E2ESystem('baseline-ls-estimation', ofdm_params, model_params, scene, eval_mode=eval_mode, gen_data=False)
-            _, bler = sim_ber(model, ebno_dbs, batch_size=model_params['batch_size'], num_target_block_errors=100, max_mc_iter=100, early_stop=True)
-            BLER['baseline-ls-estimation'] = bler.numpy()
-            
             model = E2ESystem('neural-receiver', ofdm_params, model_params, scene, eval_mode=eval_mode, gen_data=False)
             model(model_params['batch_size'], tf.constant(ebno_db_max, tf.float32))
             model_weights_path = 'data/neural_receiver_weights'
             with open(model_weights_path, 'rb') as f:
                 weights = pickle.load(f)
             model.set_weights(weights)
-            _, bler = sim_ber(model, ebno_dbs, batch_size=model_params['batch_size'], num_target_block_errors=100, max_mc_iter=100, early_stop=True)
-            BLER['neural-receiver'] = bler.numpy()
+            ber, bler = sim_ber(model, ebno_dbs, batch_size=model_params['batch_size'], num_target_block_errors=100, max_mc_iter=100, early_stop=True)
+            BLER['neural-receiver'] = ber.numpy()
+            
+            model = E2ESystem('baseline-ls-estimation', ofdm_params, model_params, scene, eval_mode=eval_mode, gen_data=False)
+            ber, bler = sim_ber(model, ebno_dbs, batch_size=model_params['batch_size'], num_target_block_errors=100, max_mc_iter=100, early_stop=True)
+            BLER['baseline-ls-estimation'] = ber.numpy()
+            
+            model = E2ESystem('baseline-perfect-csi', ofdm_params, model_params, scene, eval_mode=eval_mode, gen_data=False)
+            ber, bler = sim_ber(model, ebno_dbs, batch_size=model_params['batch_size'], num_target_block_errors=100, max_mc_iter=100, early_stop=True)
+            BLER['baseline-perfect-csi'] = ber.numpy()
 
             plt.figure(figsize=(10, 6))
             # Baseline - Perfect CSI
@@ -127,7 +126,7 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
             # Neural receiver
             plt.semilogy(ebno_dbs, BLER['neural-receiver'], 's-.', c=f'C2', label=f'Neural receiver')
             plt.xlabel(r"$E_b/N_0$ (dB)")
-            plt.ylabel("BLER")
+            plt.ylabel("BER")
             plt.grid(which="both")
             # plt.ylim((1e-4, 1.0))
             plt.legend()

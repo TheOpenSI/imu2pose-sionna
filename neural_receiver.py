@@ -7,14 +7,12 @@ from tensorflow.keras.layers import Layer, Conv2D, LayerNormalization
 from tensorflow.nn import relu
 from sionna.mimo import StreamManagement
 from sionna.channel import CIRDataset, OFDMChannel
+from sionna.channel.tr38901 import CDL, Antenna, AntennaArray
 from sionna.ofdm import ResourceGrid, ResourceGridMapper, RemoveNulledSubcarriers, LSChannelEstimator, LMMSEEqualizer, ResourceGridDemapper
 from sionna.mapping import Mapper, Demapper
 from sionna.rt import PlanarArray, Receiver, Transmitter
 from sionna.utils import BinarySource, ebnodb2no, insert_dims, flatten_last_dims, log10, expand_to_rank
 from utils.imu_functions import pre_processing_imu, imu_to_binary, binary_to_imu, numpy_to_tensorflow_source
-
-import matplotlib
-matplotlib.use('QtAgg')
 
 
 def prepare_source_data(shape, quantization_level, down_sample=1):
@@ -42,7 +40,7 @@ def prepare_source_data(shape, quantization_level, down_sample=1):
     return b, imu
 
 
-def generate_channel_impulse_responses(scene, num_cirs, batch_size_cir, rg, num_tx_ant, num_paths, uplink=True, save=True):
+def generate_channel_impulse_responses(scene, num_cirs, batch_size_cir, rg, num_tx_ant, num_rx_ant, num_paths, uplink=True, save=True):
     max_depth = 5
     min_gain_db = -130  # in dB / ignore any position with less than -130 dB path gain
     max_gain_db = 0  # in dB / ignore any position with more than 0 dB path gain
@@ -51,19 +49,27 @@ def generate_channel_impulse_responses(scene, num_cirs, batch_size_cir, rg, num_
     max_dist = 400  # in m
 
     if save:
+        # Remove old tx from scene
+        scene.remove('tx')
+        scene.synthetic_array = True # Emulate multiple antennas to reduce ray tracing complexity
+        scene.tx_array = PlanarArray(num_rows=1,
+                             num_cols=int(num_rx_ant/2), # We want to transmitter to be equiped with the 16 rx antennas
+                             vertical_spacing=0.5,
+                             horizontal_spacing=0.5,
+                             pattern="tr38901",
+                             polarization="cross")
+        # Create transmitter
+        tx = Transmitter(name="tx",
+                        position=[-160.0, 70.0, 15.0],
+                        look_at=[0, 0, 0]) # optional, defines view direction
+        scene.add(tx)
+        
         # Update coverage map
         print('Update coverage map ...')
         cm = scene.coverage_map(max_depth=max_depth, diffraction=True, cm_cell_size=(1.0, 1.0), combining_vec=None,
                                 precoding_vec=None, num_samples=int(1e6)
                                 )
         
-        # remove current RX (user) and then simulating multiple random-positinoed RXs (users) later with ray tracing
-        scene.remove("rx")  
-
-        # Configure antenna array for all transmitters (=UEs)
-        scene.rx_array = PlanarArray(num_rows=1, num_cols=int(num_tx_ant/2), vertical_spacing=0.5,
-                                 horizontal_spacing=0.5, pattern='iso', polarization='cross'
-                                 )
         # TODO: update orientation and height of the rx_array based on the IMU attached on the user head
         # Create batch_size receivers
         # sample batch_size random user positions from coverage map
@@ -75,11 +81,26 @@ def generate_channel_impulse_responses(scene, num_cirs, batch_size_cir, rg, num_
                                         min_dist=min_dist,
                                         max_dist=max_dist)
         ue_pos = tf.squeeze(ue_pos)
+        
+        # remove current RX (user) and then simulating multiple random-positinoed RXs (users) later with ray tracing
+        scene.remove("rx")  
+        for i in range(batch_size_cir):
+            scene.remove(f"rx-{i}")
+            
+        scene.rx_array = PlanarArray(num_rows=1,
+                             num_cols=num_tx_ant, # We want to transmitter to be equiped with the 16 rx antennas
+                             vertical_spacing=0.5,
+                             horizontal_spacing=0.5,
+                             pattern="iso",
+                             polarization="V")  # Single antenna
+            
         for i in range(batch_size_cir):
             rx = Receiver(name=f"rx-{i}",
                           position=ue_pos[i],  # Random position sampled from coverage map
                           )
             scene.add(rx)
+            
+        # scene.render_to_file("birds_view", show_devices=True, resolution=[650, 500], filename='data/user_positions.png')
 
         print('Generating batches of CIRs (a, tau): ...')
         a, tau = None, None
@@ -111,11 +132,12 @@ def generate_channel_impulse_responses(scene, num_cirs, batch_size_cir, rg, num_
             )  # shared between all tx in a scene
 
             # Transform paths into channel impulse responses
-            paths.reverse_direction = True  # Convert to uplink direction
+            paths.normalize_delays = True
+            paths.reverse_direction = uplink  # Convert to uplink direction
             paths.apply_doppler(sampling_frequency=rg.subcarrier_spacing,
                                 num_time_steps=rg.num_ofdm_symbols,
                                 tx_velocities=[0.0, 0.0, 0.0],
-                                rx_velocities=[3.0, 3.0, 0.0])
+                                rx_velocities=[4.0, 3.0, 0.0])
 
             # We fix here the maximum number of paths to 75 which ensures
             # that we can simply concatenate different channel impulse reponses
@@ -131,8 +153,8 @@ def generate_channel_impulse_responses(scene, num_cirs, batch_size_cir, rg, num_
                 tau = np.concatenate([tau, tau_], axis=2)
 
         # Exchange the num_tx and batchsize dimensions
-        a = np.transpose(a, [3, 1, 2, 0, 4, 5, 6])
-        tau = np.transpose(tau, [2, 1, 0, 3])
+        a = np.transpose(a, [3, 1, 2, 0, 4, 5, 6])  # [3, 1, 2, 0, 4, 5, 6]
+        tau = np.transpose(tau, [2, 1, 0, 3])  # [2, 1, 0, 3]
 
         # Remove CIRs that have no active link (i.e., a is all-zero)
         p_link = np.sum(np.abs(a) ** 2, axis=(1, 2, 3, 4, 5, 6))
@@ -149,38 +171,39 @@ def generate_channel_impulse_responses(scene, num_cirs, batch_size_cir, rg, num_
 
 # Class from https://nvlabs.github.io/sionna/examples/Sionna_Ray_Tracing_Introduction.html#BER-Evaluation
 class CIRGenerator:
-    def __init__(self,
-                 a,
-                 tau,
-                 num_tx,
-                 reverse_direction):
-
+    def __init__(self, a, tau, num_tx, training):
         # Copy to tensorflow
         self._a = tf.constant(a, tf.complex64)
         self._tau = tf.constant(tau, tf.float32)
         self._dataset_size = self._a.shape[0]
-
+        self._trainset_size = int(0.8 * self._dataset_size)
+        self._testset_size = self._dataset_size - self._trainset_size
         self._num_tx = num_tx
-        self._reverse_direction = reverse_direction
+        self._training = training
+        # Separate the indices for train and test sets
+        self._train_indices = tf.range(self._trainset_size, dtype=tf.int64)
+        self._test_indices = tf.range(self._trainset_size, self._dataset_size, dtype=tf.int64)
 
     def __call__(self):
-
         # Generator implements an infinite loop that yields new random samples
+        # Choose the appropriate set of indices
+        indices = self._train_indices if self._training else self._test_indices
+        dataset_size = self._trainset_size if self._training else self._testset_size
         while True:
             # Sample random users and stack them together
             idx, _, _ = tf.random.uniform_candidate_sampler(
-                tf.expand_dims(tf.range(self._dataset_size, dtype=tf.int64), axis=0),
-                num_true=self._dataset_size,
+                tf.expand_dims(indices, axis=0),
+                num_true=dataset_size,
                 num_sampled=self._num_tx,
                 unique=True,
                 range_max=self._dataset_size)
-
+    
             a = tf.gather(self._a, idx)
             tau = tf.gather(self._tau, idx)
 
             # Transpose to remove batch dimension
-            a = tf.transpose(a, [3, 1, 2, 0, 4, 5, 6])
-            tau = tf.transpose(tau, [2, 1, 0, 3])
+            a = tf.transpose(a, [3, 1, 2, 0, 4, 5, 6])  
+            tau = tf.transpose(tau, [2, 1, 0, 3]) 
 
             # And remove batch-dimension
             a = tf.squeeze(a, axis=0)
@@ -341,50 +364,6 @@ class NeuralReceiver(Layer):
 class E2ESystem(Model):
     r"""
     Keras model that implements the end-to-end systems.
-
-    As the three considered end-to-end systems (perfect CSI baseline, LS estimation baseline, and neural receiver) share most of
-    the link components (transmitter, channel model, outer code...), they are implemented using the same Keras model.
-
-    When instantiating the Keras model, the parameter ``system`` is used to specify the system to setup,
-    and the parameter ``training`` is used to specified if the system is instantiated to be trained or to be evaluated.
-    The ``training`` parameter is only relevant when the neural
-
-    At each call of this model:
-    * A batch of codewords is randomly sampled, modulated, and mapped to resource grids to form the channel inputs
-    * A batch of channel realizations is randomly sampled and applied to the channel inputs
-    * The receiver is executed on the post-DFT received samples to compute LLRs on the coded bits.
-      Which receiver is executed (baseline with perfect CSI knowledge, baseline with LS estimation, or neural receiver) depends
-      on the specified ``system`` parameter.
-    * If not training, the outer decoder is applied to reconstruct the information bits
-    * If training, the BMD rate is estimated over the batch from the LLRs and the transmitted bits
-
-    Parameters
-    -----------
-    system : str
-        Specify the receiver to use. Should be one of 'baseline-perfect-csi', 'baseline-ls-estimation' or 'neural-receiver'
-
-    training : bool
-        Set to `True` if the system is instantiated to be trained. Set to `False` otherwise. Defaults to `False`.
-        If the system is instantiated to be trained, the outer encoder and decoder are not instantiated as they are not required for training.
-        This significantly reduces the computational complexity of training.
-        If training, the bit-metric decoding (BMD) rate is computed from the transmitted bits and the LLRs. The BMD rate is known to be
-        an achievable information rate for BICM systems, and therefore training of the neural receiver aims at maximizing this rate.
-
-    Input
-    ------
-    batch_size : int
-        Batch size
-
-    no : scalar or [batch_size], tf.float
-        Noise variance.
-        At training, a different noise variance should be sampled for each batch example.
-
-    Output
-    -------
-    If ``training`` is set to `True`, then the output is a single scalar, which is an estimation of the BMD rate computed over the batch. It
-    should be used as objective for training.
-    If ``training`` is set to `False`, the transmitted information bits and their reconstruction on the receiver side are returned to
-    compute the block/bit error rate.
     """
 
     def __init__(self, system, ofdm_params, model_params, scene, eval_mode=0, gen_data=True):
@@ -396,6 +375,8 @@ class E2ESystem(Model):
         num_ofdm_symbols=ofdm_params['num_ofdm_symbols'],
         fft_size=ofdm_params['fft_size'],
         subcarrier_spacing=ofdm_params['subcarrier_spacing'],
+        num_tx=ofdm_params['num_tx'],
+        num_streams_per_tx=ofdm_params['num_tx_ant'],
         cyclic_prefix_length=ofdm_params['cyclic_prefix_length'],
         num_guard_carriers=ofdm_params['num_guard_carriers'],
         dc_null=ofdm_params['dc_null'],
@@ -403,44 +384,47 @@ class E2ESystem(Model):
         pilot_ofdm_symbol_indices=ofdm_params['pilot_ofdm_symbol_indices']
         )
         
+        self._num_tx = ofdm_params['num_tx']
+        self._num_tx_ant = ofdm_params['num_tx_ant']
         self._n = int(self._rg.num_data_symbols * ofdm_params['num_bits_per_symbol'])
-        self._num_batches = model_params['num_batches']
-        self._quantization_level = model_params['quantization_level']
-        self._imu_frame_per_batch_tx = model_params['imu_frame_per_batch_tx']
-        
-        # Create data source with quantization:
-        # One ofdm symbol with num_ofdm_symbols=14, pilot_ofdm_symbol_indices=[2, 11],
-        # fft_size=76, num_guard_carriers=[5,6], dc_null=True, quantization_level=2**7, num_bits_per_symbol=2
-        # can transmit n = (76-1-5-6) * (14-2) * 2 = 1536 bits ~ 12 IMU features
-        # Thus, one frame of 204 IMU features is equivalent to a batch transmission with shape [mini_batch_size, 1, 1, 1536] ~ imu_shape [1, 204]
-        # In other words, we need mini_batch_size=17 OFDM frames (17 ms) to transmit one IMU frame.
-        # That's why be set batch_size = mini_batch_size * imu_frame_per_batch_tx
+
         if self._eval_mode != 3:
             self._batch_size = model_params['batch_size']
-        else:
-            mini_batch_size = int(204 * self._quantization_level / self._n)
-            self._batch_size = mini_batch_size * self._imu_frame_per_batch_tx
-        
-        if self._eval_mode != 3:
             self._binary_source = BinarySource()
         else:
-            self._binary_source = CustomBinarySource(shape=(self._batch_size * self._num_batches, 1, 1, self._n), quantz_lv=self._quantization_level)
-
+            # Create data source with quantization:
+            # One ofdm symbol with num_ofdm_symbols=14, pilot_ofdm_symbol_indices=[2, 11],
+            # fft_size=76, num_guard_carriers=[5,6], dc_null=True, quantization_level=2**7, num_bits_per_symbol=2
+            # can transmit n = (76-1-5-6) * (14-2) * 2 = 1536 bits ~ 12 IMU features
+            # Thus, one frame of 204 IMU features is equivalent to a batch transmission with shape [mini_batch_size, 1, 1, 1536] ~ imu_shape [1, 204]
+            # In other words, we need mini_batch_size=17 OFDM frames (17 ms) to transmit one IMU frame.
+            # That's why be set batch_size = mini_batch_size * imu_frame_per_batch_tx
+            imu_frame_per_batch_tx = model_params['imu_frame_per_batch_tx']
+            mini_batch_size = int(204 * model_params['quantization_level'] / self._n)
+            self._batch_size = mini_batch_size * imu_frame_per_batch_tx
+            self._binary_source = CustomBinarySource(
+                shape=(self._batch_size * model_params['num_batches'], self._num_tx, self._num_tx_ant, self._n), 
+                quantz_lv=model_params['quantization_level']
+                )
+        
         # Customized channel
-        num_paths = 14
-        a, tau = generate_channel_impulse_responses(scene, 5000, 200, self._rg, ofdm_params['num_tx_ant'], num_paths, True, gen_data)
+        num_paths = 75
+        a, tau = generate_channel_impulse_responses(scene, 10000, 100, self._rg, ofdm_params['num_tx_ant'], ofdm_params['num_rx_ant'], num_paths, True, gen_data)
         print('a.shape: {}'.format(a.shape))
         print('tau.shape: {}'.format(tau.shape))
-        cir_generator = CIRGenerator(a, tau, ofdm_params['num_tx'], True)
+        if eval_mode == 0 or eval_mode == 1:
+            cir_generator = CIRGenerator(a, tau, ofdm_params['num_tx'], training=True)
+        else:
+            cir_generator = CIRGenerator(a, tau, ofdm_params['num_tx'], training=False)
         # Note that we swap the roles of UE and BS here as we are using uplink
         channel_model = CIRDataset(cir_generator, self._batch_size, ofdm_params['num_rx'], ofdm_params['num_rx_ant'], ofdm_params['num_tx'], ofdm_params['num_tx_ant'],
                                 num_paths, ofdm_params['num_ofdm_symbols']
                                 )
         self._channel = OFDMChannel(channel_model, self._rg, normalize_channel=True, return_channel=True, add_awgn=True)
         del a, tau
-
+        
         # Mapper and stream management
-        self._sm = StreamManagement(rx_tx_association=np.ones([1, 1], bool), num_streams_per_tx=1)
+        self._sm = StreamManagement(rx_tx_association=np.ones([1, self._num_tx], bool), num_streams_per_tx=self._num_tx_ant)
         self._mapper = Mapper('qam', ofdm_params['num_bits_per_symbol'])
         self._rg_mapper = ResourceGridMapper(self._rg)
         self._num_bits_per_sym = ofdm_params['num_bits_per_symbol']
@@ -450,13 +434,11 @@ class E2ESystem(Model):
         if "baseline" in system:
             if system == 'baseline-perfect-csi':  # Perfect CSI
                 self._removed_null_subc = RemoveNulledSubcarriers(self._rg)
-                self._ls_est = LSChannelEstimator(self._rg, interpolation_type="nn")
             elif system == 'baseline-ls-estimation':  # LS estimation
-                self._removed_null_subc = RemoveNulledSubcarriers(self._rg)
                 self._ls_est = LSChannelEstimator(self._rg, interpolation_type="nn")
             # Components required by both baselines
             self._lmmse_equ = LMMSEEqualizer(self._rg, self._sm)
-            self._demapper = Demapper("maxlog", "qam", ofdm_params['num_bits_per_symbol'])
+            self._demapper = Demapper("app", "qam", ofdm_params['num_bits_per_symbol'])
         elif system == "neural-receiver":  # Neural receiver
             self._neural_receiver = NeuralReceiver()
             self._rg_demapper = ResourceGridDemapper(self._rg, self._sm)
@@ -471,17 +453,18 @@ class E2ESystem(Model):
         no = ebnodb2no(ebno_db, self._num_bits_per_sym, 1.0, self._rg)
 
         if isinstance(self._binary_source, BinarySource):
-            b = self._binary_source([batch_size, 1, 1, self._n])
+            # [batch_size, num_tx, num_streams_per_tx, num_data_symbols * num_bits_per_sym]
+            b = self._binary_source([batch_size, self._num_tx, self._num_tx_ant, self._n])
         else:
-            b = self._binary_source([batch_size, 1, 1, self._n], batch_idx=batch_idx)
+            b = self._binary_source([batch_size, self._num_tx, self._num_tx_ant, self._n], batch_idx=batch_idx)
         # Modulation
         x = self._mapper(b)
         x_rg = self._rg_mapper(x)
 
         # Channel
         # A batch of new channel realizations is sampled and applied at every inference
-        # no_ = expand_to_rank(no, tf.rank(x_rg))
-        y, h = self._channel([x_rg, no])
+        no_ = expand_to_rank(no, tf.rank(x_rg))
+        y, h = self._channel([x_rg, no_])
 
         # Receiver
         # Three options for the receiver depending on the value of ``system``
@@ -492,28 +475,16 @@ class E2ESystem(Model):
             elif self._system == 'baseline-ls-estimation':
                 h_hat, err_var = self._ls_est([y, no])  # LS channel estimation with nearest-neighbor
             
-            h_perf = self._removed_null_subc(h)[0,0,0,0,0,0]
-            # plt.figure()
-            # plt.plot(np.real(h_perf))
-            # plt.plot(np.imag(h_perf))
-            # plt.plot(np.real(h_hat[0,0,0,0,0,0]), "--")
-            # plt.plot(np.imag(h_hat[0,0,0,0,0,0]), "--")
-            # plt.xlabel("Subcarrier index")
-            # plt.ylabel("Channel frequency response")
-            # plt.legend(["Ideal (real part)", "Ideal (imaginary part)", "Estimated (real part)", "Estimated (imaginary part)"]);
-            # plt.title("Comparison of channel frequency responses")
-            # plt.savefig('data/channel.png')
-            
             x_hat, no_eff = self._lmmse_equ([y, h_hat, err_var, no]) # LMMSE equalization
             no_eff_= expand_to_rank(no_eff, tf.rank(x_hat))
             llr = self._demapper([x_hat, no_eff_]) # Demapping
         elif self._system == "neural-receiver":
             # The neural receiver computes LLRs from the frequency domain received symbols and N0
             y = tf.squeeze(y, axis=1)
-            llr = self._neural_receiver([y, no])
-            llr = insert_dims(llr, 2, 1)  # Reshape the input to fit what the resource grid demapper is expected
-            llr = self._rg_demapper(llr) # Extract data-carrying resource elements. The other LLrs are discarded
-            llr = tf.reshape(llr, [batch_size, 1, 1, self._n])  # Reshape the LLRs to fit what the outer decoder is expected
+            llr = self._neural_receiver([y, no])  # [batch size, num ofdm symbols, num subcarriers, num_bits_per_symbol]
+            llr = insert_dims(llr, 2, 1)  # Reshape the input to fit what the resource grid demapper is expected (128, 1, 1, 14, 76, 2) -> [batch_size, num_rx, num_streams_per_rx, num_data_symbols, data_dim]
+            llr = self._rg_demapper(llr) # Extract data-carrying resource elements. The other LLrs are discarded  (128, 4, 2, 1536) 
+            llr = tf.reshape(llr, [batch_size, self._num_tx, self._num_tx_ant, self._n])  # Reshape the LLRs to fit what the outer decoder is expected
 
         # Outer coding is not needed if the information rate is returned
         if self._eval_mode == 0 or self._eval_mode == 1:

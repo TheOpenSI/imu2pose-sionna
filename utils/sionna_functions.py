@@ -44,8 +44,8 @@ def configure_antennas(scene, scene_name, num_tx_ant=8, num_rx_ant=4, position_t
                                  horizontal_spacing=0.5, pattern='tr38901', polarization='cross'
                                  )
     # configure antenna array for all receivers
-    scene.rx_array = PlanarArray(num_rows=1, num_cols=int(num_tx_ant/2), vertical_spacing=0.5,
-                                 horizontal_spacing=0.5, pattern='iso', polarization='cross'
+    scene.rx_array = PlanarArray(num_rows=1, num_cols=num_tx_ant, vertical_spacing=0.5,
+                                 horizontal_spacing=0.5, pattern='iso', polarization='V'
                                  )
 
     print('Number of TX antennas: {}'.format(scene.tx_array.num_ant))
@@ -59,8 +59,8 @@ def configure_antennas(scene, scene_name, num_tx_ant=8, num_rx_ant=4, position_t
             position_tx = [-160.0, 70.0, 15.0]
             position_rx = [80.0, 70.0, 1.5]
         elif scene_name.find('munich') != -1:
-            position_tx = [-260.0, 90.0, 20.0]
-            position_rx = [20.0, 60.0, 1.5]
+            position_tx = [-210,73,105] 
+            position_rx = [45,90,1.5]
     # create transmitter
     tx = Transmitter(name='tx', position=position_tx)
     scene.add(tx)

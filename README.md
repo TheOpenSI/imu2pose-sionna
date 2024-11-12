@@ -18,4 +18,4 @@ pip install -r requirements.txt
 - [ ] Human body within 3D map 
 
 ### To-do
-- [ ] Fixing Perfect-CSI baseline
+- [x] Fixing Perfect-CSI baseline
