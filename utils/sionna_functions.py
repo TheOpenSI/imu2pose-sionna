@@ -1,6 +1,6 @@
 import numpy as np
 import sionna
-import sionna_vispy
+# import sionna_vispy
 import tensorflow as tf
 import matplotlib.pyplot as plt
 from sionna.rt import load_scene, Transmitter, Receiver, PlanarArray, CoverageMap

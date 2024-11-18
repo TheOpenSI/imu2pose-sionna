@@ -160,12 +160,24 @@ def generate_channel_impulse_responses(scene, num_cirs, batch_size_cir, rg, num_
         p_link = np.sum(np.abs(a) ** 2, axis=(1, 2, 3, 4, 5, 6))
         a = a[p_link > 0., ...]
         tau = tau[p_link > 0., ...]
+        
+        # Remove CIRs that have invalid shapes
+        a_list = [a[i] for i in range(a.shape[0])]
+        tau_list = [tau[i] for i in range(tau.shape[0])]
 
-        np.save('data/a_dataset.npy', a)
-        np.save('data/tau_dataset.npy', tau)
+        # Filter out elements with invalid shape
+        valid_a_list = [arr for arr in a_list if len(arr.shape) == 6]
+        valid_tau_list = [arr for arr in tau_list if len(arr.shape) == 3]
+
+        # Convert back to a numpy array if needed
+        valid_a_array = np.array(valid_a_list)
+        valid_tau_array = np.array(valid_tau_list)
+
+        np.save('data/a_dataset_etoile.npy', valid_a_array)
+        np.save('data/tau_dataset_etoile.npy', valid_tau_array)
     else:
-        a = np.load('data/a_dataset.npy')
-        tau = np.load('data/tau_dataset.npy')
+        a = np.load('data/a_dataset_etoile.npy')
+        tau = np.load('data/tau_dataset_etoile.npy')
 
     return a, tau
 
@@ -186,13 +198,13 @@ class CIRGenerator:
 
     def __call__(self):
         # Generator implements an infinite loop that yields new random samples
-        # Choose the appropriate set of indices
-        indices = self._train_indices if self._training else self._test_indices
-        dataset_size = self._trainset_size if self._training else self._testset_size
         while True:
             # Sample random users and stack them together
+            # Choose the appropriate set of indices
+            indices = self._train_indices if self._training else self._test_indices
+            dataset_size = self._trainset_size if self._training else self._testset_size
             idx, _, _ = tf.random.uniform_candidate_sampler(
-                tf.expand_dims(indices, axis=0),
+                indices[tf.newaxis, :],
                 num_true=dataset_size,
                 num_sampled=self._num_tx,
                 unique=True,
@@ -201,13 +213,18 @@ class CIRGenerator:
             a = tf.gather(self._a, idx)
             tau = tf.gather(self._tau, idx)
 
-            # Transpose to remove batch dimension
-            a = tf.transpose(a, [3, 1, 2, 0, 4, 5, 6])  
-            tau = tf.transpose(tau, [2, 1, 0, 3]) 
+            # Transpose to remove batch dimension  
+            # TODO: verify transpose if having more than one TX
+            # a = tf.transpose(a, perm=[3, 1, 2, 0, 4, 5, 6])  
+            # # print('tau.shape-b: {}'.format(tau.shape))
+            # tau = tf.transpose(tau, perm=[2, 1, 0, 3]) 
+            # print('tau.shape-a: {}'.format(tau.shape))
 
             # And remove batch-dimension
             a = tf.squeeze(a, axis=0)
             tau = tf.squeeze(tau, axis=0)
+            # print('a.shape: {}'.format(a.shape))
+            # print('tau.shape: {}'.format(tau.shape))
             yield a, tau
 
 class CustomBinarySource(Layer):
@@ -337,11 +354,14 @@ class NeuralReceiver(Layer):
 
     def call(self, inputs):
         y, no = inputs
+        # print('y.shape nc: {}'.format(y.shape))
 
         # Feeding the noise power in log10 scale helps with the performance
         no = log10(no)
 
         # Stacking the real and imaginary components of the different antennas along the 'channel' dimension
+        # TODO: modify hard defined numbers [batch_size, num_rx_ant, num_ofdm_symbols, num_subcarriers]
+        y = tf.ensure_shape(y, [y.shape[0], 16, 14, 128]) 
         y = tf.transpose(y, [0, 2, 3, 1])  # Putting antenna dimension last
         no = insert_dims(no, 3, 1)
         no = tf.tile(no, [1, y.shape[1], y.shape[2], 1])
@@ -409,7 +429,7 @@ class E2ESystem(Model):
         
         # Customized channel
         num_paths = 75
-        a, tau = generate_channel_impulse_responses(scene, 10000, 100, self._rg, ofdm_params['num_tx_ant'], ofdm_params['num_rx_ant'], num_paths, True, gen_data)
+        a, tau = generate_channel_impulse_responses(scene, 6000, 100, self._rg, ofdm_params['num_tx_ant'], ofdm_params['num_rx_ant'], num_paths, True, gen_data)
         print('a.shape: {}'.format(a.shape))
         print('tau.shape: {}'.format(tau.shape))
         if eval_mode == 0 or eval_mode == 1:
@@ -443,7 +463,7 @@ class E2ESystem(Model):
             self._neural_receiver = NeuralReceiver()
             self._rg_demapper = ResourceGridDemapper(self._rg, self._sm)
 
-    # @tf.function 
+    # @tf.function
     def call(self, batch_size, ebno_db, batch_idx=0):
         # If `ebno_db` is a scalar, a tensor with shape [batch size] is created as it is what is expected by some layers
         if len(ebno_db.shape) == 0:
@@ -463,8 +483,10 @@ class E2ESystem(Model):
 
         # Channel
         # A batch of new channel realizations is sampled and applied at every inference
-        no_ = expand_to_rank(no, tf.rank(x_rg))
-        y, h = self._channel([x_rg, no_])
+        # no_ = expand_to_rank(no, tf.rank(x_rg))
+        # print('x_rg.shape: {}'.format(x_rg.shape))
+        # print('no_.shape: {}'.format(no_.shape))
+        y, h = self._channel([x_rg, no])
 
         # Receiver
         # Three options for the receiver depending on the value of ``system``

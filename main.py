@@ -17,7 +17,22 @@ from utils.sionna_functions import (load_3d_map, configure_antennas, configure_r
 from utils.imu_functions import pre_processing_imu, imu_to_binary, binary_to_imu, numpy_to_tensorflow_source
 from neural_receiver import E2ESystem
 
-# tf.random.set_seed(1)
+# Configure which GPU
+if os.getenv("CUDA_VISIBLE_DEVICES") is None:
+    gpu_num = 0 # Use "" to use the CPU
+    os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_num}"  
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    for i in range(len(gpus)):
+        try:
+            tf.config.experimental.set_memory_growth(gpus[i], True)
+        except RuntimeError as e:
+            print(e)
+tf.get_logger().setLevel('ERROR')
+
+print("Num GPUs Available: ", len(gpus))
 
 def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
     # End-to-end model
@@ -30,9 +45,9 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
         'delay_spread': 100e-9,  # s
         'speed': 10.0,  # Speed for evaluation and training [m/s]
         'ebno_db_min': -5.0,  # SNR range for evaluation and training [dB]
-        'ebno_db_max': 20.0,
+        'ebno_db_max': 15.0,
         'subcarrier_spacing': 30e3,  # Hz - OFDM waveform configuration
-        'fft_size': 76,  # No of subcarriers in the resource grid, including the null-subcarrier and the guard bands
+        'fft_size': 128,  # No of subcarriers in the resource grid, including the null-subcarrier and the guard bands
         'num_ofdm_symbols': 14,  # Number of OFDM symbols forming the resource grid
         'dc_null': True,  # Null the DC subcarrier
         'num_guard_carriers': [5, 6],  # Number of guard carriers on each side
@@ -70,13 +85,13 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
         if eval_mode == 1:
             # keep training the model from check point
             model(model_params['batch_size'], tf.constant(ebno_db_max, tf.float32))
-            model_weights_path = 'data/neural_receiver_weights'
+            model_weights_path = 'data/neural_receiver_weights_128'
             with open(model_weights_path, 'rb') as f:
                 weights = pickle.load(f)
             model.set_weights(weights)
         for i in range(1, num_epochs + 1):
             # Sampling a batch of SNRs
-            ebno_db = tf.random.uniform(shape=[], minval=ebno_db_min, maxval=ebno_db_max)
+            ebno_db = tf.random.uniform(shape=[model_params['batch_size']], minval=ebno_db_min, maxval=ebno_db_max)
             # Forward pass
             with tf.GradientTape() as tape:
                 rate = model(model_params['batch_size'], ebno_db)
@@ -86,10 +101,10 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
             grads = tape.gradient(loss, weights)
             optimizer.apply_gradients(zip(grads, weights))
             # Periodically printing the progress
-            if i % 10 == 0:
-                print('Iteration {}/{}  Rate: {:.4f} bit'.format(i, num_epochs, rate.numpy()), end='\r')
+            if i % 50 == 0:
+                print('Iteration {}/{}  Rate: {:.4f} bit'.format(i, num_epochs, rate.numpy()))
                 weights = model.get_weights()
-                model_weights_path = 'data/neural_receiver_weights'
+                model_weights_path = 'data/neural_receiver_weights_128'
                 with open(model_weights_path, 'wb') as f:
                     pickle.dump(weights, f)
     else:
@@ -103,20 +118,20 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
             
             model = E2ESystem('neural-receiver', ofdm_params, model_params, scene, eval_mode=eval_mode, gen_data=False)
             model(model_params['batch_size'], tf.constant(ebno_db_max, tf.float32))
-            model_weights_path = 'data/neural_receiver_weights'
+            model_weights_path = 'data/neural_receiver_weights_128'
             with open(model_weights_path, 'rb') as f:
                 weights = pickle.load(f)
             model.set_weights(weights)
             ber, bler = sim_ber(model, ebno_dbs, batch_size=model_params['batch_size'], num_target_block_errors=100, max_mc_iter=100, early_stop=True)
-            BLER['neural-receiver'] = ber.numpy()
+            BLER['neural-receiver'] = bler.numpy()
             
             model = E2ESystem('baseline-ls-estimation', ofdm_params, model_params, scene, eval_mode=eval_mode, gen_data=False)
             ber, bler = sim_ber(model, ebno_dbs, batch_size=model_params['batch_size'], num_target_block_errors=100, max_mc_iter=100, early_stop=True)
-            BLER['baseline-ls-estimation'] = ber.numpy()
+            BLER['baseline-ls-estimation'] = bler.numpy()
             
             model = E2ESystem('baseline-perfect-csi', ofdm_params, model_params, scene, eval_mode=eval_mode, gen_data=False)
             ber, bler = sim_ber(model, ebno_dbs, batch_size=model_params['batch_size'], num_target_block_errors=100, max_mc_iter=100, early_stop=True)
-            BLER['baseline-perfect-csi'] = ber.numpy()
+            BLER['baseline-perfect-csi'] = bler.numpy()
 
             plt.figure(figsize=(10, 6))
             # Baseline - Perfect CSI
@@ -126,9 +141,9 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
             # Neural receiver
             plt.semilogy(ebno_dbs, BLER['neural-receiver'], 's-.', c=f'C2', label=f'Neural receiver')
             plt.xlabel(r"$E_b/N_0$ (dB)")
-            plt.ylabel("BER")
+            plt.ylabel("BLER")
             plt.grid(which="both")
-            # plt.ylim((1e-4, 1.0))
+            plt.ylim((1e-4, 1.0))
             plt.legend()
             plt.tight_layout()
             plt.savefig('data/ber.png')
@@ -136,7 +151,7 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
             # We use customized data source with larget batch_size than 128
             batch_size = model.get_batch_size()
             model(batch_size, tf.constant(ebno_db_max, tf.float32))
-            model_weights_path = 'data/neural_receiver_weights'
+            model_weights_path = 'data/neural_receiver_weights_128'
             with open(model_weights_path, 'rb') as f:
                 weights = pickle.load(f)
             model.set_weights(weights)
