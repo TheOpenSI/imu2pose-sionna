@@ -3,18 +3,10 @@ import pickle
 import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
-from tensorflow.keras.layers import Layer
-from sionna.rt import PlanarArray, Receiver, Camera
-from sionna.mimo import StreamManagement
-from sionna.mimo.precoding import normalize_precoding_power, grid_of_beams_dft
-from sionna.ofdm import (ResourceGrid, ResourceGridMapper, LSChannelEstimator, RemoveNulledSubcarriers,
-                         LMMSEEqualizer, ZFPrecoder)
-from sionna.mapping import Mapper, Demapper
-from sionna.channel import CIRDataset, cir_to_ofdm_channel, subcarrier_frequencies, ApplyOFDMChannel, OFDMChannel
-from sionna.utils import compute_ber, ebnodb2no, sim_ber, BinarySource
-from utils.sionna_functions import (load_3d_map, configure_antennas, configure_radio_material,
-                                    plot_h_freq, render_scene, plot_cir, plot_estimated_channel)
-from utils.imu_functions import pre_processing_imu, imu_to_binary, binary_to_imu, numpy_to_tensorflow_source
+from sionna.rt import  Camera
+from sionna.utils import sim_ber
+from utils.sionna_functions import (load_3d_map, configure_antennas, render_scene)
+from utils.imu_functions import pre_processing_imu, imu_to_binary, binary_to_imu
 from neural_receiver import E2ESystem
 
 # Configure which GPU
@@ -85,10 +77,11 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
         if eval_mode == 1:
             # keep training the model from check point
             model(model_params['batch_size'], tf.constant(ebno_db_max, tf.float32))
-            model_weights_path = 'data/neural_receiver_weights_128'
+            model_weights_path = 'data/neural_receiver_weights'
             with open(model_weights_path, 'rb') as f:
                 weights = pickle.load(f)
             model.set_weights(weights)
+        rate_values = []
         for i in range(1, num_epochs + 1):
             # Sampling a batch of SNRs
             ebno_db = tf.random.uniform(shape=[model_params['batch_size']], minval=ebno_db_min, maxval=ebno_db_max)
@@ -101,10 +94,16 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
             grads = tape.gradient(loss, weights)
             optimizer.apply_gradients(zip(grads, weights))
             # Periodically printing the progress
-            if i % 50 == 0:
+            if i % 10 == 0:
                 print('Iteration {}/{}  Rate: {:.4f} bit'.format(i, num_epochs, rate.numpy()))
+                rate_values.append(rate.numpy())
+                plt.plot(np.arange(len(rate_values)), rate_values, '-b')
+                plt.xlabel('Iteration (x10)')
+                plt.ylabel('Rate')
+                plt.savefig('data/rate_plot.png')
+                
                 weights = model.get_weights()
-                model_weights_path = 'data/neural_receiver_weights_128'
+                model_weights_path = 'data/neural_receiver_weights'
                 with open(model_weights_path, 'wb') as f:
                     pickle.dump(weights, f)
     else:
@@ -118,7 +117,7 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
             
             model = E2ESystem('neural-receiver', ofdm_params, model_params, scene, eval_mode=eval_mode, gen_data=False)
             model(model_params['batch_size'], tf.constant(ebno_db_max, tf.float32))
-            model_weights_path = 'data/neural_receiver_weights_128'
+            model_weights_path = 'data/neural_receiver_weights'
             with open(model_weights_path, 'rb') as f:
                 weights = pickle.load(f)
             model.set_weights(weights)
@@ -151,7 +150,7 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
             # We use customized data source with larget batch_size than 128
             batch_size = model.get_batch_size()
             model(batch_size, tf.constant(ebno_db_max, tf.float32))
-            model_weights_path = 'data/neural_receiver_weights_128'
+            model_weights_path = 'data/neural_receiver_weights'
             with open(model_weights_path, 'rb') as f:
                 weights = pickle.load(f)
             model.set_weights(weights)
@@ -197,7 +196,7 @@ if __name__ == '__main__':
     # Parse parameters
     parser = argparse.ArgumentParser(description='Main script')
     parser.add_argument('--gen_data', type=int, help='Generate channel impulse response dataset', default=0)
-    parser.add_argument('--num_ep', type=int, help='Number of training epochs', default=10000)
+    parser.add_argument('--num_ep', type=int, help='Number of training epochs', default=40000)
     parser.add_argument('--eval_mode', type=int, help='Training from scratch (0) - Training from check point (1) - BER evaluation (2) - Custom data forward (3)', default=0)
     args = parser.parse_args()
 
