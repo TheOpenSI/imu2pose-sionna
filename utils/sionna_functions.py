@@ -59,16 +59,15 @@ def configure_antennas(scene, scene_name, num_tx_ant=8, num_rx_ant=4, position_t
             position_tx = [-160.0, 70.0, 15.0]
             position_rx = [80.0, 70.0, 1.5]
         elif scene_name.find('munich') != -1:
-            position_tx = [-210,73,105] 
-            position_rx = [45,90,1.5]
+            position_tx = [8.5, 21, 27] 
+            position_rx = [45, 90, 1.5]
     # create transmitter
     tx = Transmitter(name='tx', position=position_tx)
     scene.add(tx)
 
     # create receiver
-    rx = Receiver(name='rx', position=position_rx)
+    rx = Receiver(name='rx', position=position_rx) # position will be updated later
     scene.add(rx)
-    tx.look_at(rx)
 
     return scene
 
