@@ -1,6 +1,71 @@
+import os
+import platform
 import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
+
+os_name = platform.system()
+if os_name == 'Linux':
+    imu_dataset_path = os.path.expanduser('~/Data/datasets/DIP_IMU_and_Others/') 
+else:
+    imu_dataset_path = os.path.expanduser('~/datasets/DIP_IMU_and_Others/') 
+    
+
+def prepare_source_data(num_imu_frames, batch_size, n, quantization_level):
+    """
+    Perform quantization on original IMU data and transform source IMU data into source bits. 
+    
+    Args:
+        - num_imu_frames (int): number of IMU data frames used as source data 
+        - batch_size (int): batch size of a single forward through OFDM channel. This will be used 
+        as input of the call() function in the CustomBinarySource class
+        - n (int): number of data bits per OFDM resource grid
+        - quantization_level (int): number of quantization levels used for quantizing IMU signals
+        
+    Return:
+        - source_ofdm_bit [num_batches, batch_size, 1, 1, n]: source bits to be transmitted over OFDM channel
+        - source_imu_quantized [num_batches, 204], source IMU data after quantization 
+        - source_imu_original [num_batches, 204], source IMU data before quantization
+    """
+    # load IMU data
+    path = imu_dataset_path +  'processed_test.npz'
+    data = np.load(path)['imu']
+    data = np.squeeze(data)
+    data = pre_processing_imu(data)
+    print('Original IMU shape: {}'.format(data.shape))
+    
+    # Get a fixed number of IMU samples [num_imu_frames, 204]
+    data = data[:num_imu_frames]
+    print('Source IMU shape: {}'.format(data.shape))
+
+    # Quantization imu [num_imu_frames, 204] -> source_bits [num_imu_frames, 204, bits_per_value] 
+    data_min = np.min(data, axis=0)
+    data_max = np.max(data, axis=0)
+    source_bits = imu_to_binary(data, quantization_level, data_min, data_max)
+    source_bits = np.asarray(source_bits)
+    print('Quantized source IMU shape: {} ~ {} bits '.format(source_bits.shape, np.prod(source_bits.shape)))
+     
+    # Transform source_bits [num_imu_frames, 204, bits_per_value] into ofdm_bits [(num_imu_frames / batch_size) * (204 * bits_per_value / n), batch_size, 1, 1, n]
+    bits_per_value = int(np.ceil(np.log2(quantization_level)))
+    num_ofdm_rg_batches = (num_imu_frames / batch_size) * (204 * bits_per_value / n)
+    num_ofdm_rg_batches = int(num_ofdm_rg_batches)  # 30
+    num_source_bits_used = num_ofdm_rg_batches * batch_size * n  # 8352000
+    print('Number of source bits used: {}'.format(num_source_bits_used))
+    # trim the source_bits into a shorter sequence, so that we can transform it into batches of ofdm_bits
+    source_bits = source_bits.flatten()[:num_source_bits_used]
+    ofdm_bits = np.reshape(source_bits, [num_ofdm_rg_batches, batch_size, 1, 1, n])
+    print('OFDM source bits shape: {}'.format(ofdm_bits.shape))
+    
+    # De-quantization bits [num_ofdm_rg_batches, batch_size, 1, 1, n] -> [num_imu_frames_used, 204, bits_per_value] 
+    # and -> [num_imu_frames_used, 204], note that num_imu_frames_used will be shorter due to the bits <-> ofdm_bits conversation
+    num_imu_frames_used = (num_ofdm_rg_batches * batch_size * n) / (204 * bits_per_value)
+    num_imu_frames_used = int(num_imu_frames_used)  # 5848
+    print('Number of IMU frames used: {}'.format(num_imu_frames_used))
+    
+    imu_quantized = binary_to_imu(ofdm_bits, quantization_level, (num_imu_frames_used, 204), data_min, data_max)
+    imu_original = data[:num_imu_frames_used]
+
+    return ofdm_bits, imu_quantized, imu_original
 
 def pre_processing_imu(input_data):
     """
@@ -50,88 +115,85 @@ def visualize_imu_data(imu_data, num_features=3):
     plt.tight_layout()
     plt.show()
 
-def imu_to_binary(imu_data, quantization_level):
+def imu_to_binary(imu_data, quantization_level, data_min, data_max):
     """
-    Transforms IMU sensor data into a binary sequence and handles NaN values with interpolation.
+    Transforms IMU sensor data into a binary sequence.
 
     Parameters:
         imu_data (numpy array): 2D array of IMU sensor readings.
         quantization_level (int): Number of quantization levels.
+        data_min (numpy array): 1D array of minimum values for each of the 204 features.
+        data_max (numpy array): 1D array of maximum values for each of the 204 features.
 
     Returns:
-        binary_sequence (str): The binary representation of quantized IMU data.
+        binary_sequence (numpy flatten array): The binary representation of quantized IMU data.
     """
-    # Normalize the IMU data to the range [0, 1]
-    data_min = np.min(imu_data)
-    data_max = np.max(imu_data)
-
-    if data_min == data_max:
-        normalized_data = np.zeros_like(imu_data)
-    else:
-        normalized_data = (imu_data - data_min) / (data_max - data_min)
+    # Check if the data_min and data_max are valid
+    if np.any(data_min == data_max):
+        raise ValueError("IMU data has zero range for one or more features. All values are identical, so quantization is not possible for those features.")
+    
+    # Normalize the IMU data to the range [0, 1] for each feature dimension
+    normalized_data = (imu_data - data_min) / (data_max - data_min)
 
     # Quantize the data
     quantized_data = np.floor(normalized_data * (quantization_level - 1)).astype(int)
 
-    # Convert the quantized data into a binary sequence
+    # Determine bits per value
     bits_per_value = int(np.ceil(np.log2(quantization_level)))
-    bit_array = np.array([list(format(value, f'0{bits_per_value}b')) for value in quantized_data.flatten()], dtype=int)
 
-    # Reshape the bit array into the appropriate shape (number of values * bits per value)
-    bit_array = bit_array.flatten()
+    # Vectorized binary conversion using bitwise operations
+    binary_array = ((quantized_data[:, :, None] & (1 << np.arange(bits_per_value)[::-1])) > 0).astype(int)
 
-    return bit_array
+    return binary_array
 
 
-def binary_to_imu(binary_sequence, quantization_level, original_shape, data_min, data_max):
+def binary_to_imu(binary_sequence, quantization_level, imu_shape, data_min, data_max):
     """
     Recovers the original data from a binary sequence (with quantization error).
 
     Parameters:
-        binary_sequence (str): The binary representation of quantized IMU data.
+        binary_sequence (numpy array or str): The binary representation of quantized IMU data.
         quantization_level (int): Number of quantization levels.
-        original_shape (tuple): Shape of the original data.
-        data_min (float): Minimum value of the original data.
-        data_max (float): Maximum value of the original data.
+        imu_shape (tuple): Shape of the IMU data (seq_len, 204).
+        data_min (numpy array, optional): 1D array of minimum values for each of the 204 features.
+        data_max (numpy array, optional): 1D array of maximum values for each of the 204 features.
 
     Returns:
-        recovered_data (numpy array): The recovered data with quantization error.
+        recovered_data (numpy array): The recovered data (seq_len, 204) with quantization error.
     """
     # Determine the number of bits used per quantized value
-    bits_per_value = int(np.ceil(np.log2(quantization_level)))
-    # print('bits_per_value: {}'.format(bits_per_value))
+    bits_per_value = int(np.log2(quantization_level))
 
     # Ensure the binary sequence is a string, or convert a numpy array of bits to a string
     if isinstance(binary_sequence, np.ndarray):
-        # Join the bits into a single binary string
-        binary_sequence = ''.join(binary_sequence.astype(str))
-
-    # Adjust binary sequence length to match the total size required
-    total_elements = np.prod(original_shape)
-    required_bits = total_elements * bits_per_value
-
-    # Ensure the binary sequence has enough bits
-    if len(binary_sequence) < required_bits:
-        raise ValueError(
-            f"Not enough bits in the binary sequence: {len(binary_sequence)} available, {required_bits} required.")
-
-    binary_sequence = binary_sequence[:required_bits]  # Trim or pad if necessary
-
-    # Split the binary sequence into chunks of size bits_per_value
-    quantized_values = [
-        int(binary_sequence[i * bits_per_value:(i + 1) * bits_per_value], 2)
-        for i in range(len(binary_sequence) // bits_per_value)
-    ]
-
-    # Ensure the quantized values can be reshaped into the original shape
-    if len(quantized_values) != total_elements:
-        raise ValueError(
-            f"Number of quantized values ({len(quantized_values)}) does not match the required number of elements ({total_elements}).")
+        binary_sequence = ''.join(map(str, binary_sequence.flatten()))
+        
+    print('len binary_sequence: {}'.format(len(binary_sequence)))
+    
+    # if not np.all(np.isin(binary_sequence, [0, 1])):
+    #     raise ValueError("Binary sequence must only contain 0s and 1s.")
+    
+   # Split the binary sequence into chunks of size bits_per_value and convert to integer
+    try:
+        quantized_values = [
+            int(binary_sequence[i * bits_per_value:(i + 1) * bits_per_value], 2)
+            for i in range(len(binary_sequence) // bits_per_value)
+        ]
+    except ValueError as e:
+        raise ValueError(f"Invalid binary sequence chunk detected. Ensure that the binary sequence contains only '0' and '1'. Original error: {e}")
+    
+    total_elements = np.prod(imu_shape)
+    print('len quantized_values: {}'.format(len(quantized_values)))
+    quantized_values = quantized_values[:total_elements]  # Trim excess values
 
     # Reshape the quantized values back into the original shape
-    quantized_array = np.array(quantized_values).reshape(original_shape)
+    quantized_array = np.array(quantized_values).reshape(imu_shape)
+    
+    # Check if the data_min and data_max are valid
+    if np.any(data_min == data_max):
+        raise ValueError("IMU data has zero range for one or more features. All values are identical, so rescaling is not possible for those features.")
 
-    # Rescale the quantized data back to the original range [data_min, data_max]
+    # Rescale the quantized data back to the original range per feature dimension
     normalized_recovered_data = quantized_array / (quantization_level - 1)
     recovered_data = normalized_recovered_data * (data_max - data_min) + data_min
 
@@ -159,48 +221,25 @@ def numpy_to_tensorflow_source(bit_array, shape):
 
 def test_imu_functions():
     # Load IMU data
-    path = '/Users/hieu/datasets/DIP_IMU_and_Others/processed_test.npz'
-    imu = np.load(path)['imu']
-    len_imu = imu.shape[0]
-    print('imu.shape: {}'.format(imu.shape))
+    quantization_level = 2**7
+    n = 2784
+    num_imu_frames = 6000
+    batch_size = 100
+    source_bits, source_imu_quantized, source_imu_original = prepare_source_data(
+        num_imu_frames=num_imu_frames, batch_size=batch_size, 
+        n=n, quantization_level=quantization_level
+        )
+    
+    print('source_bits.shape: {}'.format(source_bits.shape))
+    print('source_imu_quantized.shape: {}'.format(source_imu_quantized.shape))
+    print('source_imu_original.shape: {}'.format(source_imu_original.shape))
 
     batch_size = 5000
-    min_val = -1.0
-    max_val = 1.0
-
-    # Assume arbitrary feature length, modify this line to adapt
-    num_features = imu.shape[-1]
-
-    # Reshape to (num_samples, num_features) if needed
-    imu_data = imu.reshape((len_imu, num_features))
-
-    # Pre-process IMU data
-    imu_data = imu_data[:batch_size]
-    imu_data = pre_processing_imu(imu_data)
-    print('imu_data shape after preprocessing: {}'.format(imu_data.shape))
 
     # Visualize IMU data
-    visualize_imu_data(imu_data)
+    visualize_imu_data(source_imu)
 
-    # Specify quantization level
-    quantization_level = 2 ** 7
-
-    # Get binary sequence
-    binary_sequence = imu_to_binary(imu_data, quantization_level)
-
-    # Show first 100 bits of the binary sequence
-    print(binary_sequence[:100])
-    print('Binary sequence length: {}'.format(len(binary_sequence)))
-
-    # Recover data
-    recovered_data = binary_to_imu(binary_sequence, quantization_level,
-                                   imu_data.shape, min_val, max_val
-                                   )
-    print('recovered_data shape: {}'.format(recovered_data.shape))
-    mse = np.mean((imu_data - recovered_data) ** 2)
-    print('MSE between original and recovered data: {}'.format(mse))
-
-    visualize_imu_data(recovered_data)
+    # visualize_imu_data(recovered_data)
 
 
 if __name__ == '__main__':

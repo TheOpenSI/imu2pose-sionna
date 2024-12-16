@@ -15,12 +15,12 @@ if __name__ == "__main__":
     # This is loading the DIP-IMU data that can be downloaded from the DIP project website here:
     # https://dip.is.tue.mpg.de/download.php
     # Download the "DIP IMU and others" and point the following path to one of the extracted pickle files.
-    file_path = os.path.expanduser('~/datasets/DIP_IMU_and_Others/DIP_IMU/s_10/05.pkl')
+    file_path = os.path.expanduser('~/Data/datasets/DIP_IMU_and_Others/DIP_IMU/s_10/05.pkl')
     with open(file_path, "rb") as f:
         data = pkl.load(f, encoding="latin1")
 
     C.update_conf({"run_animations": True,
-                   'smplx_models': os.path.expanduser('/Users/hieu/datasets/SMPLs/models'),
+                   'smplx_models': os.path.expanduser('~/Data/smpl_dataset/smpl'),
                    })
 
     # Whether we want to visualize all 17 sensors or just the 6 sensors used by DIP.

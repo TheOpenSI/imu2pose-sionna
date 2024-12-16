@@ -1,4 +1,5 @@
 import os
+import platform
 import tensorflow as tf
 import numpy as np
 import matplotlib.pyplot as plt
@@ -7,37 +8,34 @@ from tensorflow.keras.layers import Layer, Conv2D, LayerNormalization
 from tensorflow.nn import relu
 from sionna.mimo import StreamManagement
 from sionna.channel import CIRDataset, OFDMChannel
-from sionna.channel.tr38901 import CDL, Antenna, AntennaArray
 from sionna.ofdm import ResourceGrid, ResourceGridMapper, RemoveNulledSubcarriers, LSChannelEstimator, LMMSEEqualizer, ResourceGridDemapper
 from sionna.mapping import Mapper, Demapper
 from sionna.utils import BinarySource, ebnodb2no, insert_dims, flatten_last_dims, log10, expand_to_rank
-from utils.imu_functions import pre_processing_imu, imu_to_binary, binary_to_imu, numpy_to_tensorflow_source
-from utils.sionna_functions import configure_antennas
+from utils.imu_functions import prepare_source_data
 
+os_name = platform.system()
+if os_name == 'Linux':
+    imu_dataset_path = os.path.expanduser('~/Data/datasets/DIP_IMU_and_Others/') 
+else:
+    imu_dataset_path = os.path.expanduser('~/datasets/DIP_IMU_and_Others/') 
+    
+class CustomBinarySource(Layer):
+    def __init__(self, num_imu_frames, batch_size, n, quantz_lv=128, dtype=tf.float32, seed=None, **kwargs):
+        super().__init__(dtype=dtype, **kwargs)
+        self._seed = seed
+        self.source_bits, self.source_imu_quantized, self.source_imu_original = prepare_source_data(
+            num_imu_frames=num_imu_frames, batch_size=batch_size, n=n, quantization_level=quantz_lv
+            )
+        self.num_ofdm_rg_batches = self.source_bits.shape[0]
 
-def prepare_source_data(shape, quantization_level, down_sample=1):
-    # load IMU data
-    path = os.path.expanduser('~/datasets/DIP_IMU_and_Others/processed_test.npz')
-    data = np.load(path)['imu']
-    data = np.squeeze(data)
-    # Downsample original data for visualization
-    data = data[::down_sample]
-    print('Original IMU shape: {}'.format(data.shape))
-    data = pre_processing_imu(data)
-
-    # Quantization
-    bits_per_value = int(np.ceil(np.log2(quantization_level)))
-    source_bits = imu_to_binary(data, quantization_level)
-    print('Source bits len: {}'.format(len(source_bits)))
-    batch_len = int(np.prod(shape))
-    batch_bits = source_bits[:batch_len]
-    print('Batch bits len: {}'.format(len(batch_bits)))
-    imu_shape = (shape[0], shape[1], shape[2], int(shape[3]/quantization_level))
-    imu = binary_to_imu(batch_bits, quantization_level, imu_shape, -1.0, 1.0)
-    b = numpy_to_tensorflow_source(batch_bits, shape)
-    print('imu.shape: {}'.format(imu.shape))
-
-    return b, imu
+    def call(self, inputs, batch_idx=0):
+        # inputs.shape [batch_size, 1, 1, n]
+        if isinstance(inputs, int):
+            batch_size = inputs
+        else:
+            batch_size = inputs[0]
+        b = self.source_bits[batch_idx]  # [batch_size, 1, 1, n] 
+        return b
 
 # Class from https://nvlabs.github.io/sionna/examples/Sionna_Ray_Tracing_Introduction.html#BER-Evaluation
 class CIRGenerator:
@@ -84,46 +82,6 @@ class CIRGenerator:
             # print('a.shape: {}'.format(a.shape))
             # print('tau.shape: {}'.format(tau.shape))
             yield a, tau
-
-class CustomBinarySource(Layer):
-    def __init__(self, shape=(10200, 1, 1, 1536), quantz_lv=128, dtype=tf.float32, seed=None, **kwargs):
-        super().__init__(dtype=dtype, **kwargs)
-        self._seed = seed
-        self.shape = shape
-        self.mini_batch_size = int(204 * quantz_lv / 1536)
-        self.b_all, self.imu_all = prepare_source_data(shape=shape, quantization_level=quantz_lv)
-        # b.shape and imu.shape conversion: [17, 1, 1, 1536] ~ [1, 204]
-        print('b_all.shape: {}'.format(self.b_all.shape))  # [10200, 1, 1, 1536]
-        print('imu_all.shape: {}'.format(self.imu_all.shape))  # [600, 204]  # why (10200, 1, 1, 12)?
-
-
-    def call(self, inputs, batch_idx=0):
-        # inputs.shape [170, 1, 1, 1536]
-        # Obtain batch size from inputs shape or as a direct parameter
-        if isinstance(inputs, int):
-            batch_size = inputs
-        else:
-            batch_size = inputs[0]
-        start_idx = batch_idx * batch_size
-        end_idx = start_idx + batch_size
-        # Ensure indices are within bounds of `b_all`
-        if end_idx > self.b_all.shape[0]:
-            raise ValueError(f"Batch index out of range: requested {end_idx} but only {self.b_all.shape[0]} samples available.")
-        b = tf.gather(self.b_all, tf.range(start_idx, end_idx))  # [170, 1, 1, 1536] ~ (10, 204)
-        return b
-
-    def get_batch_imu_shape(self, batch_size):
-        imu_shape = [int(batch_size / self.mini_batch_size), 204]
-        return imu_shape
-
-    def get_dataset_len(self):
-        return self.shape[0]
-
-    def b_to_imu(self, b):
-        '''
-        Convert binary batch `b` into `imu` data
-        '''
-        # b [batch_size, 1, 1, n]
 
 class ResidualBlock(Layer):
     r"""
@@ -272,17 +230,12 @@ class E2ESystem(Model):
         else:
             # Create data source with quantization:
             # One ofdm symbol with num_ofdm_symbols=14, pilot_ofdm_symbol_indices=[2, 11],
-            # fft_size=76, num_guard_carriers=[5,6], dc_null=True, quantization_level=2**7, num_bits_per_symbol=2
-            # can transmit n = (76-1-5-6) * (14-2) * 2 = 1536 bits ~ 12 IMU features
-            # Thus, one frame of 204 IMU features is equivalent to a batch transmission with shape [mini_batch_size, 1, 1, 1536] ~ imu_shape [1, 204]
-            # In other words, we need mini_batch_size=17 OFDM frames (17 ms) to transmit one IMU frame.
-            # That's why be set batch_size = mini_batch_size * imu_frame_per_batch_tx
-            imu_frame_per_batch_tx = model_params['imu_frame_per_batch_tx']
-            mini_batch_size = int(204 * model_params['quantization_level'] / self._n)
-            self._batch_size = mini_batch_size * imu_frame_per_batch_tx
+            # fft_size=128, num_guard_carriers=[5,6], dc_null=True, quantization_level=2**8, num_bits_per_symbol=2
+            # Thus, n = (128-1-5-6) * (14-2) * 2 = 2784 bits
+            self._batch_size = model_params['batch_size']
             self._binary_source = CustomBinarySource(
-                shape=(self._batch_size * model_params['num_batches'], self._num_tx, self._num_tx_ant, self._n), 
-                quantz_lv=model_params['quantization_level']
+                num_imu_frames=model_params['num_imu_frames'], batch_size=self._batch_size, 
+                n=self._n, quantz_lv=model_params['quantization_level']
                 )
         
         if eval_mode == 0 or eval_mode == 1:

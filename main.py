@@ -5,12 +5,11 @@ import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
 from copy import deepcopy
-from sionna.utils import sim_ber
+from sionna.utils import sim_ber, compute_ber
 from sionna.ofdm import ResourceGrid
 from sionna.rt import PlanarArray, Receiver, Transmitter, Camera
-from utils.sionna_functions import (load_3d_map, render_scene)
-from utils.imu_functions import pre_processing_imu, imu_to_binary, binary_to_imu
-from utils.sionna_functions import configure_antennas
+from utils.sionna_functions import (load_3d_map, render_scene, configure_antennas)
+from utils.imu_functions import binary_to_imu
 from neural_receiver import E2ESystem
 
 # Configure which GPU
@@ -193,21 +192,80 @@ def generate_channel_impulse_responses(scene, map_name, num_cirs, batch_size_cir
 
     return a, tau
 
-def train_on_batch(batch_size, ebno_db_min, ebno_db_max, model, optimizer):
-    ebno_db = tf.random.uniform(shape=[batch_size], minval=ebno_db_min, maxval=ebno_db_max)
-    with tf.GradientTape() as tape:
-        rate = model(batch_size, ebno_db)
-        loss = -rate
-    weigths = model.trainable_weights
-    grads = tape.gradient(loss, weigths)
-    optimizer.apply_gradients(zip(grads, weigths))
-    for i in range(len(weigths)):
-        weigths[i] = weigths[i] - 0.02 * grads[i]  # inner_step_size * grads
-    model.set_weights(weigths)
-    return rate
+def mse_simulation(quantization_range, ofdm_params, model_params, a, tau):
+    MSE = {}
+    ofdm_params['ebno_db_max'] = 10.0
+    
+    for system in ['neural-receiver', 'baseline-ls-estimation', 'baseline-perfect-csi']: 
+        print('MSE evaluation on {}'.format(system))   
+        mse_system, ber_system = [], []
+        for i, ql in enumerate(quantization_range):
+            print('-- Quantization level: {}'.format(ql))
+            model_params['quantization_level'] = 2**ql
+            
+            model = E2ESystem(system, ofdm_params, model_params, a, tau, eval_mode=3, gen_data=False)
+            batch_size = model.get_batch_size()
+            if system == 'neural-receiver':
+                model(batch_size, tf.constant(ofdm_params['ebno_db_max'], tf.float32))
+                model_weights_path = 'data/neural_receiver_weights'
+                with open(model_weights_path, 'rb') as f:
+                    weights = pickle.load(f)
+                model.set_weights(weights)
+            
+            binary_source = model.get_binary_source()
+            b_all, b_hat_all = [], []
+            for batch_id in range(binary_source.num_ofdm_rg_batches):
+                
+                b, b_hat = model(batch_size, tf.constant(ofdm_params['ebno_db_max'], tf.float32), batch_id)
+                b_all.append(b)
+                b_hat_all.append(b_hat)
+            b_all = np.concatenate(np.asarray(b_all, dtype=int), axis=0)
+            b_hat_all = np.concatenate(np.asarray(b_hat_all, dtype=int), axis=0)
+            origin_data = binary_source.source_imu_original
+            quantized_data = binary_source.source_imu_quantized
+            data_min = np.min(origin_data, axis=0)
+            data_max = np.max(origin_data, axis=0)
+            recovered_data = binary_to_imu(b_hat_all, model_params['quantization_level'], quantized_data.shape, data_min, data_max)
+            print('b_all.shape: {}'.format(b_all.shape))
+            print('b_hat_all.shape: {}'.format(b_hat_all.shape))
+            
+            # Print results
+            mse_i = np.mean((quantized_data - recovered_data)**2)
+            ber_i = compute_ber(b_all, b_hat_all).numpy()
+            mse_system.append(mse_i)
+            ber_system.append(ber_i)
+            # print some samples to see if recovered data is correct
+            print('quantized data: {}'.format(quantized_data[:2, :10]))
+            print('recovered data: {}'.format(recovered_data[:2, :10]))
+            
+            # save results
+            np.save('data/ori_imu_{}_{}_{}.npy'.format(system, ql, ofdm_params['ebno_db_max']), origin_data)
+            np.save('data/qtz_imu_{}_{}_{}.npy'.format(system, ql, ofdm_params['ebno_db_max']), quantized_data)
+            np.save('data/rec_imu_{}_{}_{}.npy'.format(system, ql, ofdm_params['ebno_db_max']), recovered_data)
+            
+        print('---- MSE {}: {}'.format(system, np.mean(mse_system)))    
+        print('---- BER: {}: {}'.format(system, np.mean(ber_system)))
+        
+        MSE[system] = mse_system
+        
+    plt.figure(figsize=(10, 6))
+    # Neural receiver
+    plt.semilogy(quantization_range, MSE['neural-receiver'], 's-', c=f'C0', label=f'Neural Receiver')
+    # Baseline - LS Estimation
+    plt.semilogy(quantization_range, MSE['baseline-ls-estimation'], '*--', c=f'C1', label=f'Baseline - LS Estimation')
+    # Baseline - Perfect CSI
+    plt.semilogy(quantization_range, MSE['baseline-perfect-csi'], 'o--', c=f'C2', label=f'Baseline - Perfect CSI')
+    plt.xlabel("Quatization level")
+    plt.ylabel("MSE")
+    plt.grid(which="both")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('data/mse.png')
+        
+    print(MSE)
     
 
-def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0, meta_train=False):
+def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
     # End-to-end model
     ofdm_params = {
         'num_rx_ant': 16,  # base station
@@ -229,10 +287,9 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0, meta_train=F
     }
     
     model_params = {
-        'quantization_level': 2**7,  # quanization level
-        'batch_size': 128,  # batch size for training
-        'num_batches': 10,  # number of training batches
-        'imu_frame_per_batch_tx': 60,  # number of IMU data samples to be transmitted per batch_size transmission
+        'quantization_level': 2**8,  # quanization level
+        'batch_size': 100,  # batch size for OFDM transmission
+        'num_imu_frames': 6000,  # number of IMU frames 
     }
 
     if gen_data:
@@ -292,10 +349,7 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0, meta_train=F
             # keep training the model from check point
             ebno_db = tf.random.uniform(shape=[model_params['batch_size']], minval=ebno_db_min, maxval=ebno_db_max)
             model(model_params['batch_size'], ebno_db)
-            if not meta_train:
-                model_weights_path = 'data/neural_receiver_weights'
-            else:
-                model_weights_path = 'data/meta_receiver_weights'
+            model_weights_path = 'data/neural_receiver_weights'
             with open(model_weights_path, 'rb') as f:
                 weights = pickle.load(f)
             model.set_weights(weights)
@@ -303,28 +357,13 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0, meta_train=F
         for i in range(1, num_epochs + 1):
             # Sampling a batch of SNRs
             ebno_db = tf.random.uniform(shape=[model_params['batch_size']], minval=ebno_db_min, maxval=ebno_db_max)
-            # Forward pass
-            if not meta_train:
-                with tf.GradientTape() as tape:
-                    rate = model(model_params['batch_size'], ebno_db)
-                    loss = -rate
-                # Computing and applying gradients
-                weights = model.trainable_weights
-                grads = tape.gradient(loss, weights)
-                optimizer.apply_gradients(zip(grads, weights))
-            else:
-                model(model_params['batch_size'], ebno_db)
-                weights_before = deepcopy(model.trainable_weights)
-                for _ in range(3):  # inner epoch     
-                    rate = train_on_batch(model_params['batch_size'], ebno_db_min, ebno_db_max, model, optimizer)
-                weights_after = deepcopy(model.trainable_weights)
-                # Meta-update: Interpolate between current weights and trained weights from this task
-                outer_step_size = 0.1 * (1 - (i -1 ) / num_epochs) # linear schedule
-                new_weights = [
-                    weights_before[i] + (weights_after[i] - weights_before[i]) * outer_step_size
-                    for i in range(len(weights_before))
-                ]
-                model.set_weights(new_weights)
+            with tf.GradientTape() as tape:
+                rate = model(model_params['batch_size'], ebno_db)
+                loss = -rate
+            # Computing and applying gradients
+            weights = model.trainable_weights
+            grads = tape.gradient(loss, weights)
+            optimizer.apply_gradients(zip(grads, weights))
             # Periodically printing the progress
             if i % 10 == 0:
                 print('Iteration {}/{}  Rate: {:.4f} bit'.format(i, num_epochs, rate.numpy()))
@@ -335,10 +374,7 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0, meta_train=F
                 plt.savefig('data/rate_plot.png')
                 
                 weights = model.get_weights()
-                if not meta_train:
-                    model_weights_path = 'data/neural_receiver_weights'
-                else:
-                    model_weights_path = 'data/meta_receiver_weights'
+                model_weights_path = 'data/neural_receiver_weights'
                 with open(model_weights_path, 'wb') as f:
                     pickle.dump(weights, f)
     else:
@@ -350,17 +386,7 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0, meta_train=F
             
             BLER = {}
             
-            # meta-learning model
-            model = E2ESystem('neural-receiver', ofdm_params, model_params, a, tau, eval_mode=eval_mode, gen_data=False)
-            model(model_params['batch_size'], tf.constant(ebno_db_max, tf.float32))
-            model_weights_path = 'data/meta_receiver_weights'
-            with open(model_weights_path, 'rb') as f:
-                weights = pickle.load(f)
-            model.set_weights(weights)
-            ber, bler = sim_ber(model, ebno_dbs, batch_size=model_params['batch_size'], num_target_block_errors=100, max_mc_iter=100, early_stop=True)
-            BLER['meta-receiver'] = bler.numpy()
-            
-            # neural receiver
+            # Neural receiver
             model = E2ESystem('neural-receiver', ofdm_params, model_params, a, tau, eval_mode=eval_mode, gen_data=False)
             model(model_params['batch_size'], tf.constant(ebno_db_max, tf.float32))
             model_weights_path = 'data/neural_receiver_weights'
@@ -381,14 +407,12 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0, meta_train=F
             BLER['baseline-perfect-csi'] = bler.numpy()
 
             plt.figure(figsize=(10, 6))
-            # Baseline - Perfect CSI
-            plt.semilogy(ebno_dbs, BLER['baseline-perfect-csi'], 'o--', c=f'C0', label=f'Baseline - Perfect CSI')
+            # Neural receiver
+            plt.semilogy(ebno_dbs, BLER['neural-receiver'], 's-', c=f'C0', label=f'Neural Receiver')
             # Baseline - LS Estimation
             plt.semilogy(ebno_dbs, BLER['baseline-ls-estimation'], '*--', c=f'C1', label=f'Baseline - LS Estimation')
-            # Neural receiver
-            plt.semilogy(ebno_dbs, BLER['neural-receiver'], 's--', c=f'C2', label=f'Baseline - Neural receiver')
-            # Meta-learning receiver
-            plt.semilogy(ebno_dbs, BLER['meta-receiver'], '^-', c=f'C3', label=f'Meta-receiver')
+            # Baseline - Perfect CSI
+            plt.semilogy(ebno_dbs, BLER['baseline-perfect-csi'], 'o--', c=f'C2', label=f'Baseline - Perfect CSI')
             plt.xlabel(r"$E_b/N_0$ (dB)")
             plt.ylabel("BLER")
             plt.grid(which="both")
@@ -397,58 +421,17 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0, meta_train=F
             plt.tight_layout()
             plt.savefig('data/ber.png')
         else:
-            # We use customized data source with larget batch_size than 128
-            batch_size = model.get_batch_size()
-            model(batch_size, tf.constant(ebno_db_max, tf.float32))
-            model_weights_path = 'data/neural_receiver_weights'
-            with open(model_weights_path, 'rb') as f:
-                weights = pickle.load(f)
-            model.set_weights(weights)
-
-            # Recover original IMU data
-            original_batches = np.zeros(shape=(int(model_params['num_batches'] * model_params['imu_frame_per_batch_tx']), 204))  # (600, 204)
-            recovered_batches = np.zeros(shape=(int(model_params['num_batches'] * model_params['imu_frame_per_batch_tx']), 204))  # (600, 204)
-            print('Recovered IMU shape: {}'.format(recovered_batches.shape))
-
-            for batch_id in range(model_params['num_batches']):
-                # Recover original IMU data
-                # One model forward is a transmission of `imu_frame_per_batch_tx`` IMU features
-                data_source = model.get_binary_source()
-                b, b_hat = model(batch_size, tf.constant(ebno_db_max, tf.float32), batch_id)  # b: [170, 1, 1, 1536] -> imu_shape: [10, 204]
-                imu_shape = data_source.get_batch_imu_shape(batch_size=batch_size)  # [10, 204]
-                b_flat = tf.reshape(b, [-1]).numpy().astype(np.int8)
-                b_hat_flat = tf.reshape(b_hat, [-1]).numpy().astype(np.int8)
-                print('Batch: {}/{}'.format(batch_id+1, model_params['num_batches']))
-                print('--- original_imu_shape: {}'.format(imu_shape))
-                print('--- b.shape: {}/{}'.format(b.shape, b.dtype))
-                print('--- b_hat.shape: {}/{}'.format(b_hat.shape, b_hat.dtype))
-
-                # Convert binary data to IMU data for this batch
-                origin_data = binary_to_imu(b_flat, model_params['quantization_level'], imu_shape, -1.0, 1.0)  # [10, 204]
-                recovered_data = binary_to_imu(b_hat_flat, model_params['quantization_level'], imu_shape, -1.0, 1.0)  # [10, 204]
-                print('--- recovered_imu.shape: {}/{}'.format(recovered_data.shape, recovered_data.dtype))
-
-                # Append the recovered data to the main arrays in the correct order
-                start_idx = batch_id * imu_shape[0]
-                end_idx = (batch_id + 1) * imu_shape[0]
-                original_batches[start_idx:end_idx] = origin_data
-                recovered_batches[start_idx:end_idx] = recovered_data
-                np.save('data/ori_imu_{}.npy'.format(batch_id), origin_data)
-                np.save('data/rec_imu_{}.npy'.format(batch_id), recovered_data)
-
-            # Save the stacked array
-            np.save('data/ori_imu_seq_{}.npy'.format(ebno_db_max), original_batches)
-            np.save('data/rec_imu_seq_{}.npy'.format(ebno_db_max), recovered_batches)
-            print('Recovered data shape: {}, {}'.format(recovered_batches.shape, recovered_batches.dtype))
+            # MSE simulation with customized IMU data
+            quantz_range = np.arange(6, 12, 2, dtype=int)
+            mse_simulation(quantz_range, ofdm_params, model_params, a, tau)
 
 if __name__ == '__main__':
     import argparse
     # Parse parameters
     parser = argparse.ArgumentParser(description='Main script')
     parser.add_argument('--gen_data', type=int, help='Generate channel impulse response dataset', default=0)
-    parser.add_argument('--num_ep', type=int, help='Number of training epochs', default=40000)
+    parser.add_argument('--num_ep', type=int, help='Number of training epochs', default=150000)
     parser.add_argument('--eval_mode', type=int, help='Training from scratch (0) - Training from check point (1) - BER evaluation (2) - Custom data forward (3)', default=0)
-    parser.add_argument('--meta_train', type=int, help='Enable meta-learning', default=0)
     args = parser.parse_args()
 
-    evaluate_e2e_model(num_epochs=int(args.num_ep), gen_data=bool(args.gen_data), eval_mode=args.eval_mode, meta_train=bool(args.meta_train))
+    evaluate_e2e_model(num_epochs=int(args.num_ep), gen_data=bool(args.gen_data), eval_mode=args.eval_mode)
