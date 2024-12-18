@@ -187,60 +187,14 @@ def binary_to_imu(binary_sequence, quantization_level, imu_shape, data_min, data
     quantized_values = quantized_values[:total_elements]  # Trim excess values
 
     # Reshape the quantized values back into the original shape
-    quantized_array = np.array(quantized_values).reshape(imu_shape)
+    quantized_values = np.array(quantized_values).reshape(imu_shape)
     
     # Check if the data_min and data_max are valid
     if np.any(data_min == data_max):
         raise ValueError("IMU data has zero range for one or more features. All values are identical, so rescaling is not possible for those features.")
 
     # Rescale the quantized data back to the original range per feature dimension
-    normalized_recovered_data = quantized_array / (quantization_level - 1)
-    recovered_data = normalized_recovered_data * (data_max - data_min) + data_min
+    recovered_data = quantized_values / (quantization_level - 1)
+    recovered_data = recovered_data * (data_max - data_min) + data_min
 
     return recovered_data
-
-def numpy_to_tensorflow_source(bit_array, shape):
-    """
-    Converts a numpy array of binary bits into a TensorFlow 2D tensor with a specified shape.
-
-    Parameters:
-        bit_array (numpy array): The numpy array containing binary bits (0 or 1).
-        shape (tuple): The target shape for the TensorFlow tensor (e.g., (n, m)).
-
-    Returns:
-        tf_tensor (tf.Tensor): A TensorFlow tensor with the desired shape.
-    """
-    # Step 1: Convert the numpy array of bits to a TensorFlow tensor
-    tf_tensor = tf.convert_to_tensor(bit_array, dtype=tf.float32)
-
-    # Step 2: Reshape the tensor to the desired shape
-    tf_tensor = tf.reshape(tf_tensor, shape)
-
-    return tf_tensor
-
-
-def test_imu_functions():
-    # Load IMU data
-    quantization_level = 2**7
-    n = 2784
-    num_imu_frames = 6000
-    batch_size = 100
-    source_bits, source_imu_quantized, source_imu_original = prepare_source_data(
-        num_imu_frames=num_imu_frames, batch_size=batch_size, 
-        n=n, quantization_level=quantization_level
-        )
-    
-    print('source_bits.shape: {}'.format(source_bits.shape))
-    print('source_imu_quantized.shape: {}'.format(source_imu_quantized.shape))
-    print('source_imu_original.shape: {}'.format(source_imu_original.shape))
-
-    batch_size = 5000
-
-    # Visualize IMU data
-    visualize_imu_data(source_imu)
-
-    # visualize_imu_data(recovered_data)
-
-
-if __name__ == '__main__':
-    test_imu_functions()

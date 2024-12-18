@@ -29,6 +29,15 @@ tf.get_logger().setLevel('ERROR')
 
 print("Num GPUs Available: ", len(gpus))
 
+if not os.path.isdir('data/cirdata/'):
+    os.mkdir('data/cirdata')
+if not os.path.isdir('data/figures'):
+    os.mkdir('data/figures')
+if not os.path.isdir('data/weights'):
+    os.mkdir('data/weights')
+if not os.path.isdir('data/imu'):
+    os.mkdir('data/imu')
+
 def generate_channel_impulse_responses(scene, map_name, num_cirs, batch_size_cir, rg, num_tx_ant, num_rx_ant, num_paths, uplink=True):
     max_depth = 5
     min_gain_db = -130  # in dB / ignore any position with less than -130 dB path gain
@@ -56,9 +65,9 @@ def generate_channel_impulse_responses(scene, map_name, num_cirs, batch_size_cir
     sample_paths = scene.compute_paths(max_depth=5, num_samples=1e6)
     scene.render_to_file(
         "my_cam", paths=sample_paths, show_devices=True, show_paths=True, 
-        resolution=[650, 500], filename='data/scene_{}.png'.format(map_name)
+        resolution=[650, 500], filename='data/figures/scene_{}.png'.format(map_name)
         )
-    print('Rendered ray tracing scene to data/scene_{}.png'.format(map_name))
+    print('Rendered ray tracing scene to data/figures/scene_{}.png'.format(map_name))
     # render_scene(scene, paths=sample_paths)
     del sample_paths
     
@@ -187,61 +196,67 @@ def generate_channel_impulse_responses(scene, map_name, num_cirs, batch_size_cir
     valid_a_array = np.array(valid_a_list)
     valid_tau_array = np.array(valid_tau_list)
 
-    np.save('data/a_dataset_{}.npy'.format(map_name), valid_a_array)
-    np.save('data/tau_dataset_{}.npy'.format(map_name), valid_tau_array)
+    np.save('data/cirdata/a_dataset_{}.npy'.format(map_name), valid_a_array)
+    np.save('data/cirdata/tau_dataset_{}.npy'.format(map_name), valid_tau_array)
 
     return a, tau
 
-def mse_simulation(quantization_range, ofdm_params, model_params, a, tau):
+def mse_simulation(quantization_range, ebnodb_range, ofdm_params, model_params, a, tau):
     MSE = {}
-    ofdm_params['ebno_db_max'] = 10.0
     
-    for system in ['neural-receiver', 'baseline-ls-estimation', 'baseline-perfect-csi']: 
-        print('MSE evaluation on {}'.format(system))   
-        mse_system, ber_system = [], []
-        for i, ql in enumerate(quantization_range):
-            print('-- Quantization level: {}'.format(ql))
-            model_params['quantization_level'] = 2**ql
-            
-            model = E2ESystem(system, ofdm_params, model_params, a, tau, eval_mode=3, gen_data=False)
-            batch_size = model.get_batch_size()
-            if system == 'neural-receiver':
-                model(batch_size, tf.constant(ofdm_params['ebno_db_max'], tf.float32))
-                model_weights_path = 'data/neural_receiver_weights'
-                with open(model_weights_path, 'rb') as f:
-                    weights = pickle.load(f)
-                model.set_weights(weights)
-            
-            binary_source = model.get_binary_source()
-            b_all, b_hat_all = [], []
-            for batch_id in range(binary_source.num_ofdm_rg_batches):
+    for system in ['baseline-perfect-csi','neural-receiver', 'baseline-ls-estimation']: 
+        for ebno_db in ebnodb_range:
+            ofdm_params['ebno_db_max'] = ebno_db
+            print('MSE evaluation on {} at {} dB'.format(system, ebno_db))   
+            mse_system, ber_system = [], []
+            for i, ql in enumerate(quantization_range):
+                print('-- Quantization level: {}'.format(ql))
+                model_params['quantization_level'] = 2**ql
                 
-                b, b_hat = model(batch_size, tf.constant(ofdm_params['ebno_db_max'], tf.float32), batch_id)
-                b_all.append(b)
-                b_hat_all.append(b_hat)
-            b_all = np.concatenate(np.asarray(b_all, dtype=int), axis=0)
-            b_hat_all = np.concatenate(np.asarray(b_hat_all, dtype=int), axis=0)
-            origin_data = binary_source.source_imu_original
-            quantized_data = binary_source.source_imu_quantized
-            data_min = np.min(origin_data, axis=0)
-            data_max = np.max(origin_data, axis=0)
-            recovered_data = binary_to_imu(b_hat_all, model_params['quantization_level'], quantized_data.shape, data_min, data_max)
-            print('b_all.shape: {}'.format(b_all.shape))
-            print('b_hat_all.shape: {}'.format(b_hat_all.shape))
-            
-            # Print results
-            mse_i = np.mean((quantized_data - recovered_data)**2)
-            ber_i = compute_ber(b_all, b_hat_all).numpy()
-            mse_system.append(mse_i)
-            ber_system.append(ber_i)
-            # print some samples to see if recovered data is correct
-            print('quantized data: {}'.format(quantized_data[:2, :10]))
-            print('recovered data: {}'.format(recovered_data[:2, :10]))
-            
-            # save results
-            np.save('data/ori_imu_{}_{}_{}.npy'.format(system, ql, ofdm_params['ebno_db_max']), origin_data)
-            np.save('data/qtz_imu_{}_{}_{}.npy'.format(system, ql, ofdm_params['ebno_db_max']), quantized_data)
-            np.save('data/rec_imu_{}_{}_{}.npy'.format(system, ql, ofdm_params['ebno_db_max']), recovered_data)
+                model = E2ESystem(system, ofdm_params, model_params, a, tau, eval_mode=3, gen_data=False)
+                batch_size = model.get_batch_size()
+                if system == 'neural-receiver':
+                    model(batch_size, tf.constant(ofdm_params['ebno_db_max'], tf.float32))
+                    model_weights_path = 'data/weights/neural_receiver_weights'
+                    with open(model_weights_path, 'rb') as f:
+                        weights = pickle.load(f)
+                    model.set_weights(weights)
+                
+                binary_source = model.get_binary_source()
+                b_all, b_hat_all = [], []
+                for batch_id in range(binary_source.num_ofdm_rg_batches):
+                    
+                    b, b_hat = model(batch_size, tf.constant(ofdm_params['ebno_db_max'], tf.float32), batch_id)
+                    b_all.append(b)
+                    b_hat_all.append(b_hat)
+                b_all = np.concatenate(np.asarray(b_all, dtype=int), axis=0)
+                b_hat_all = np.concatenate(np.asarray(b_hat_all, dtype=int), axis=0)
+                origin_data = binary_source.source_imu_original
+                quantized_data = binary_source.source_imu_quantized
+                data_min = np.min(origin_data, axis=0)
+                data_max = np.max(origin_data, axis=0)
+                recovered_data = binary_to_imu(b_hat_all, model_params['quantization_level'], quantized_data.shape, data_min, data_max)
+                
+                del model
+                
+                print('b_all.shape: {}'.format(b_all.shape))
+                print('b_hat_all.shape: {}'.format(b_hat_all.shape))
+                
+                # Print results
+                mse_i = np.mean((origin_data - recovered_data)**2)
+                ber_i = compute_ber(b_all, b_hat_all).numpy()
+                mse_system.append(mse_i)
+                ber_system.append(ber_i)
+                # print some samples to see if recovered data is correct
+                print('original data: {}'.format(origin_data[:2, :10]))
+                print('recovered data: {}'.format(recovered_data[:2, :10]))
+                
+                # save results
+                np.save('data/imu/ori_imu_{}_{}_{}.npy'.format(system, ql, ofdm_params['ebno_db_max']), origin_data)
+                np.save('data/imu/qtz_imu_{}_{}_{}.npy'.format(system, ql, ofdm_params['ebno_db_max']), quantized_data)
+                np.save('data/imu/rec_imu_{}_{}_{}.npy'.format(system, ql, ofdm_params['ebno_db_max']), recovered_data)
+                
+                del binary_source, origin_data, quantized_data, recovered_data, b_all, b_hat_all
             
         print('---- MSE {}: {}'.format(system, np.mean(mse_system)))    
         print('---- BER: {}: {}'.format(system, np.mean(ber_system)))
@@ -260,7 +275,7 @@ def mse_simulation(quantization_range, ofdm_params, model_params, a, tau):
     plt.grid(which="both")
     plt.legend()
     plt.tight_layout()
-    plt.savefig('data/mse.png')
+    plt.savefig('data/figures/mse.png')
         
     print(MSE)
     
@@ -320,10 +335,10 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
             print('tau_{}.shape: {}'.format(map_name, tau.shape))
         sys.exit()
     else:
-        a_dataset_etoile = np.load('data/a_dataset_etoile.npy')
-        tau_dataset_etoile = np.load('data/tau_dataset_etoile.npy')
-        a_dataset_munich = np.load('data/a_dataset_munich.npy')
-        tau_dataset_munich = np.load('data/tau_dataset_munich.npy')
+        a_dataset_etoile = np.load('data/cirdata/a_dataset_etoile.npy')
+        tau_dataset_etoile = np.load('data/cirdata/tau_dataset_etoile.npy')
+        a_dataset_munich = np.load('data/cirdata/a_dataset_munich.npy')
+        tau_dataset_munich = np.load('data/cirdata/tau_dataset_munich.npy')
         
         # Combine the datasets along the first dimension
         a = np.concatenate((a_dataset_etoile, a_dataset_munich), axis=0)
@@ -339,17 +354,17 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
         print("Shape of a_dataset:", a.shape)
         print("Shape of tau_dataset:", tau.shape)
               
-    model = E2ESystem('neural-receiver', ofdm_params, model_params, a, tau, eval_mode=eval_mode, gen_data=gen_data)
-    optimizer = tf.keras.optimizers.legacy.Adam()
     ebno_db_min = ofdm_params['ebno_db_min']
     ebno_db_max = ofdm_params['ebno_db_max']
 
     if eval_mode == 0 or eval_mode == 1:
+        model = E2ESystem('neural-receiver', ofdm_params, model_params, a, tau, eval_mode=eval_mode, gen_data=gen_data)
+        optimizer = tf.keras.optimizers.legacy.Adam()
         if eval_mode == 1:
             # keep training the model from check point
             ebno_db = tf.random.uniform(shape=[model_params['batch_size']], minval=ebno_db_min, maxval=ebno_db_max)
             model(model_params['batch_size'], ebno_db)
-            model_weights_path = 'data/neural_receiver_weights'
+            model_weights_path = 'data/weights/neural_receiver_weights'
             with open(model_weights_path, 'rb') as f:
                 weights = pickle.load(f)
             model.set_weights(weights)
@@ -371,10 +386,10 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
                 plt.plot(np.arange(len(rate_values)), rate_values, '-b')
                 plt.xlabel('Iteration (x10)')
                 plt.ylabel('Rate')
-                plt.savefig('data/rate_plot.png')
+                plt.savefig('data/figures/rate_plot.png')
                 
                 weights = model.get_weights()
-                model_weights_path = 'data/neural_receiver_weights'
+                model_weights_path = 'data/weights/neural_receiver_weights'
                 with open(model_weights_path, 'wb') as f:
                     pickle.dump(weights, f)
     else:
@@ -389,7 +404,7 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
             # Neural receiver
             model = E2ESystem('neural-receiver', ofdm_params, model_params, a, tau, eval_mode=eval_mode, gen_data=False)
             model(model_params['batch_size'], tf.constant(ebno_db_max, tf.float32))
-            model_weights_path = 'data/neural_receiver_weights'
+            model_weights_path = 'data/weights/neural_receiver_weights'
             with open(model_weights_path, 'rb') as f:
                 weights = pickle.load(f)
             model.set_weights(weights)
@@ -419,11 +434,12 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
             plt.ylim((1e-4, 1.0))
             plt.legend()
             plt.tight_layout()
-            plt.savefig('data/ber.png')
+            plt.savefig('data/figures/ber.png')
         else:
             # MSE simulation with customized IMU data
-            quantz_range = np.arange(6, 12, 2, dtype=int)
-            mse_simulation(quantz_range, ofdm_params, model_params, a, tau)
+            quantz_range = np.arange(4, 11, 1, dtype=int)
+            ebno_db_range = np.arange(5, 10, 5, dtype=float)
+            mse_simulation(quantz_range, ebno_db_range, ofdm_params, model_params, a, tau)
 
 if __name__ == '__main__':
     import argparse

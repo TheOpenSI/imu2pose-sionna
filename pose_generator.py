@@ -22,6 +22,9 @@ if os_name == 'Linux':
 else:
     body_model_path = os.path.expanduser('~/datasets/SMPLs/models/smpl/SMPL_MALE.pkl') 
     imu_dataset_path = os.path.expanduser('~/datasets/DIP_IMU_and_Others/') 
+    
+if not os.path.isdir('data/weights'):
+    os.mkdir('data/weights')
 
 def build_mlp_model(input_dim, output_dim):
     """
@@ -110,7 +113,7 @@ def train_mlp(train_loader, input_dim, output_dim, epochs=10, batch_size=64):
         train_loader,
         epochs=epochs
     )
-    file_name = 'data/mlp_smpl.h5'
+    file_name = 'data/weights/mlp_smpl.h5'
     print("Save MLP_SMPL model to {}".format(file_name))
     model.save(file_name)
     
@@ -217,7 +220,7 @@ def smpl_forward(model, pose, batch_size):
     return vertices, joints
 
 def generate_pose_animation(data_loader, color):
-    file_name = 'data/mlp_smpl.h5'
+    file_name = 'data/weights/mlp_smpl.h5'
     print('Load MLP_SMPL model from: {}'.format(file_name))
     model = tf.keras.models.load_model(file_name)
     imu, gt = next(iter(data_loader))
@@ -245,9 +248,14 @@ def generate_pose_animation(data_loader, color):
 if __name__ == '__main__':
     # Arg parser
     parser = argparse.ArgumentParser(description='Pose generator script')
-    parser.add_argument('--train', type=int, help='Train MLP model from scratch', default=1)
+    parser.add_argument('--train', type=int, help='Train MLP model from scratch', default=0)
     parser.add_argument('--num_ep', type=int, help='Number of training epochs', default=50)
     parser.add_argument('--batch', type=int, help='Batch size', default=100)
+    parser.add_argument('--ebno', type=float, 
+                        help='Ebno (dB) value when running SMPL simulation at the receiver', 
+                        default=-5.0,
+                        )
+    parser.add_argument('--quantz', type=int, help='Quantization level', default=6)
     args = parser.parse_args()
     
     # Build datasets
@@ -260,10 +268,7 @@ if __name__ == '__main__':
             epochs=args.num_ep, batch_size=args.batch
             )
     
-    ebno_db = 10.0
     batch_size = 5000
-    quantz_range = np.arange(6, 12, 2, dtype=int)
-    quantz_id = quantz_range[0]
     color_list = [
         [140.0 / 255, 140.0 / 255, 140.0 / 255, 1.0],  # Ground truth - even darker gray
         [120.0 / 255, 140.0 / 255, 180.0 / 255, 1.0],  # Neural-receiver - muted gray-blue
@@ -272,9 +277,9 @@ if __name__ == '__main__':
     ]
 
     for system in ['neural-receiver', 'baseline-ls-estimation', 'baseline-perfect-csi']:  # 'baseline-ls-estimation', 'baseline-perfect-csi'
-        tx_data = np.load('data/ori_imu_{}_{}_{}.npy'.format(system, quantz_id, ebno_db))
-        qtz_data = np.load('data/qtz_imu_{}_{}_{}.npy'.format(system, quantz_id, ebno_db))
-        rx_data = np.load('data/rec_imu_{}_{}_{}.npy'.format(system, quantz_id, ebno_db))
+        tx_data = np.load('data/imu/ori_imu_{}_{}_{}.npy'.format(system, args.quantz, args.ebno))
+        qtz_data = np.load('data/imu/qtz_imu_{}_{}_{}.npy'.format(system, args.quantz, args.ebno))
+        rx_data = np.load('data/imu/rec_imu_{}_{}_{}.npy'.format(system, args.quantz, args.ebno))
         print('rx data shape: {}'.format(rx_data.shape))
         data_list = [tx_data, qtz_data, rx_data]
         for i in range(len(data_list)):
@@ -292,4 +297,5 @@ if __name__ == '__main__':
             y_test = None
             test_dataset = tf.data.Dataset.from_tensor_slices((X_test, y_test))
             test_dataset = test_dataset.batch(batch_size).prefetch(buffer_size=tf.data.AUTOTUNE)
+            # screenshot frames: 173, 510
             generate_pose_animation(test_dataset, color)

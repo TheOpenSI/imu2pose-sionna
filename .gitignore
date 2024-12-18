@@ -4,3 +4,6 @@ venv/
 __pycache__/
 data/
 myenv/
+.DS_Store
+.vscode/
+imgui.ini
