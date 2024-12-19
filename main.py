@@ -29,6 +29,8 @@ tf.get_logger().setLevel('ERROR')
 
 print("Num GPUs Available: ", len(gpus))
 
+if not os.path.isdir('data'):
+    os.mkdir('data')    
 if not os.path.isdir('data/cirdata/'):
     os.mkdir('data/cirdata')
 if not os.path.isdir('data/figures'):
