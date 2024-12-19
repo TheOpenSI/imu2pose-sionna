@@ -1,6 +1,6 @@
 import os
+import platform
 import pickle as pkl
-
 import numpy as np
 import torch
 
@@ -10,17 +10,25 @@ from aitviewer.renderables.rigid_bodies import RigidBodies
 from aitviewer.renderables.smpl import SMPLSequence
 from aitviewer.viewer import Viewer
 
+os_name = platform.system()
+if os_name == 'Linux':
+    body_model_path = os.path.expanduser('~/Data/datasets/smpl/smpl/SMPL_MALE.pkl') 
+    imu_dataset_path = os.path.expanduser('~/Data/datasets/DIP_IMU_and_Others/') 
+else:
+    body_model_path = os.path.expanduser('~/datasets/SMPLs/models/smpl/SMPL_MALE.pkl') 
+    imu_dataset_path = os.path.expanduser('~/datasets/DIP_IMU_and_Others/') 
+
 
 if __name__ == "__main__":
     # This is loading the DIP-IMU data that can be downloaded from the DIP project website here:
     # https://dip.is.tue.mpg.de/download.php
     # Download the "DIP IMU and others" and point the following path to one of the extracted pickle files.
-    file_path = os.path.expanduser('~/Data/datasets/DIP_IMU_and_Others/DIP_IMU/s_10/05.pkl')
+    file_path = imu_dataset_path + os.path.expanduser('DIP_IMU/s_10/05.pkl')
     with open(file_path, "rb") as f:
         data = pkl.load(f, encoding="latin1")
 
     C.update_conf({"run_animations": True,
-                   'smplx_models': os.path.expanduser('~/Data/smpl_dataset/smpl'),
+                   'smplx_models': body_model_path,
                    })
 
     # Whether we want to visualize all 17 sensors or just the 6 sensors used by DIP.
@@ -87,11 +95,11 @@ if __name__ == "__main__":
 
     # Display the SMPL ground-truth with a semi-transparent mesh so we can see the IMUs.
     smpl_seq = SMPLSequence(poses_body=poses[:, 3:], smpl_layer=smpl_layer, poses_root=poses[:, :3])
-    smpl_seq.mesh_seq.color = smpl_seq.mesh_seq.color[:3] + (0.5,)
+    smpl_seq.mesh_seq.color = smpl_seq.mesh_seq.color[:3] + (0.1,)
 
     # Add everything to the scene and display at 30 fps.
     v = Viewer()
     v.playback_fps = 30.0
 
-    v.scene.add(smpl_seq, rbs)
+    v.scene.add(smpl_seq)
     v.run()
