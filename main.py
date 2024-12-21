@@ -31,6 +31,8 @@ print("Num GPUs Available: ", len(gpus))
 
 if not os.path.isdir('data'):
     os.mkdir('data')    
+if not os.path.isdir('data/pltdata'):
+    os.mkdir('data/pltdata')
 if not os.path.isdir('data/cirdata/'):
     os.mkdir('data/cirdata')
 if not os.path.isdir('data/figures'):
@@ -411,32 +413,58 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0):
                 weights = pickle.load(f)
             model.set_weights(weights)
             ber, bler = sim_ber(model, ebno_dbs, batch_size=model_params['batch_size'], num_target_block_errors=100, max_mc_iter=100, early_stop=True)
-            BLER['neural-receiver'] = bler.numpy()
+            BLER['neural-receiver-1'] = bler.numpy()
             
             # LS estimation
             model = E2ESystem('baseline-ls-estimation', ofdm_params, model_params, a, tau, eval_mode=eval_mode, gen_data=False)
             ber, bler = sim_ber(model, ebno_dbs, batch_size=model_params['batch_size'], num_target_block_errors=100, max_mc_iter=100, early_stop=True)
-            BLER['baseline-ls-estimation'] = bler.numpy()
+            BLER['baseline-ls-estimation-1'] = bler.numpy()
             
             # perfect CSI
             model = E2ESystem('baseline-perfect-csi', ofdm_params, model_params, a, tau, eval_mode=eval_mode, gen_data=False)
             ber, bler = sim_ber(model, ebno_dbs, batch_size=model_params['batch_size'], num_target_block_errors=100, max_mc_iter=100, early_stop=True)
             BLER['baseline-perfect-csi'] = bler.numpy()
-
-            plt.figure(figsize=(10, 6))
+            
+            # Two pilots scenario
+            ofdm_params['pilot_ofdm_symbol_indices'] = [2]
+            
             # Neural receiver
-            plt.semilogy(ebno_dbs, BLER['neural-receiver'], 's-', c=f'C0', label=f'Neural Receiver')
+            model = E2ESystem('neural-receiver', ofdm_params, model_params, a, tau, eval_mode=eval_mode, gen_data=False)
+            model(model_params['batch_size'], tf.constant(ebno_db_max, tf.float32))
+            model_weights_path = 'data/weights/neural_receiver_weights'
+            with open(model_weights_path, 'rb') as f:
+                weights = pickle.load(f)
+            model.set_weights(weights)
+            ber, bler = sim_ber(model, ebno_dbs, batch_size=model_params['batch_size'], num_target_block_errors=100, max_mc_iter=100, early_stop=True)
+            BLER['neural-receiver-2'] = bler.numpy()
+            
+            # LS estimation
+            model = E2ESystem('baseline-ls-estimation', ofdm_params, model_params, a, tau, eval_mode=eval_mode, gen_data=False)
+            ber, bler = sim_ber(model, ebno_dbs, batch_size=model_params['batch_size'], num_target_block_errors=100, max_mc_iter=100, early_stop=True)
+            BLER['baseline-ls-estimation-2'] = bler.numpy()     
+            
+            np.save('data/pltdata/bler.npy', BLER)
+            print('BLER: {}'.format(BLER))
+
+            plt.figure()
+            # Neural receiver
+            plt.semilogy(ebno_dbs, BLER['neural-receiver-1'], 's-', c=f'C0', label=f'Neural Receiver - 1 pilot')
+            plt.semilogy(ebno_dbs, BLER['neural-receiver-2'], 's-', c=f'C1', label=f'Neural Receiver - 2 pilot')
             # Baseline - LS Estimation
-            plt.semilogy(ebno_dbs, BLER['baseline-ls-estimation'], '*--', c=f'C1', label=f'Baseline - LS Estimation')
+            plt.semilogy(ebno_dbs, BLER['baseline-ls-estimation-1'], '*--', c=f'C2', label=f'LS Estimation - 1 pilot')
+            plt.semilogy(ebno_dbs, BLER['baseline-ls-estimation-2'], '*--', c=f'C3', label=f'LS Estimation - 2 pilot')
             # Baseline - Perfect CSI
-            plt.semilogy(ebno_dbs, BLER['baseline-perfect-csi'], 'o--', c=f'C2', label=f'Baseline - Perfect CSI')
-            plt.xlabel(r"$E_b/N_0$ (dB)")
-            plt.ylabel("BLER")
+            plt.semilogy(ebno_dbs, BLER['baseline-perfect-csi'], 'o--', c=f'C4', label=f'Perfect CSI')
+            plt.xlabel(r"$E_b/N_0$ (dB)", fontsize=18)
+            plt.ylabel("BLER", fontsize=18)
+            plt.xticks(fontsize=18)
+            plt.yticks(fontsize=18)
             plt.grid(which="both")
             plt.ylim((1e-4, 1.0))
             plt.legend()
             plt.tight_layout()
             plt.savefig('data/figures/ber.png')
+            
         else:
             # MSE simulation with customized IMU data
             quantz_range = np.arange(4, 11, 1, dtype=int)

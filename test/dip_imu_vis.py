@@ -95,7 +95,7 @@ if __name__ == "__main__":
 
     # Display the SMPL ground-truth with a semi-transparent mesh so we can see the IMUs.
     smpl_seq = SMPLSequence(poses_body=poses[:, 3:], smpl_layer=smpl_layer, poses_root=poses[:, :3])
-    smpl_seq.mesh_seq.color = smpl_seq.mesh_seq.color[:3] + (0.1,)
+    smpl_seq.mesh_seq.color = smpl_seq.mesh_seq.color[:3] + (0.0,)  # change alpha to 0.0 for transparency
 
     # Add everything to the scene and display at 30 fps.
     v = Viewer()
