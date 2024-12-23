@@ -1,6 +1,7 @@
 sionna==0.19.0
 sionna-vispy==0.18.0.1
 tensorflow==2.15.1
+scikit-learn
 numpy
 matplotlib    
 smplx

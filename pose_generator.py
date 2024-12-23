@@ -1,11 +1,13 @@
 import os
 import platform
 import argparse
+import pickle as pkl
 import torch
 import smplx
 import numpy as np
 import pyvista as pv
 import tensorflow as tf
+from sklearn.preprocessing import MaxAbsScaler
 from tensorflow.keras.layers import Dense, Input
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers.legacy import Adam
@@ -46,8 +48,92 @@ def build_mlp_model(input_dim, output_dim):
     model.compile(optimizer='adam', loss='mse', metrics=['mae'])
     return model
 
+def get_data_chunks(pkl_files):
+    """
+    Return the IMU dataset. The output format is a tuple of imu with shape (seq_len, 1, 204)
+    and gt with shape (seq_len, 1, 72)
+    """
+    imu_out = []
+    gt_out = []
+    for f in pkl_files:
+        imu_ori_data = pkl.load(open(f, 'rb'), encoding='latin1')['imu_ori']  # [seq_len, 17, 3, 3]
+        imu_acc_data = pkl.load(open(f, 'rb'), encoding='latin1')['imu_acc']   # [seq_len, 17, 3]
+        gt_data = pkl.load(open(f, 'rb'), encoding='latin1')['gt']  # [seq_len, 72]
+        seq_len = imu_ori_data.shape[0]
 
-def load_dataset(batch_size=32, shuffle=True):
+        imu_ori_data = np.reshape(imu_ori_data, [seq_len, 17 * 9])
+        imu_acc_data = np.reshape(imu_acc_data, [seq_len, 17 * 3])
+        # print('One ori sample: {}'.format(imu_acc_data[0, :]))
+        imu_data = np.concatenate((imu_ori_data, imu_acc_data), axis=1)
+        merged_data = np.concatenate((imu_data, gt_data), axis=1)  # [seq_len, 276]
+        # count number of Nan entries
+        nan_mask = np.isnan(merged_data)
+        row_nan_mask = np.any(nan_mask, axis=1)
+        num_nan = np.count_nonzero(row_nan_mask)
+        # discard entries with Nan values
+        print('-- discard {} Nan entries out of {} entries----'.format(num_nan, seq_len))
+        clean_merged_data = merged_data[~np.isnan(merged_data).any(axis=1)]
+        new_seq_len = seq_len - num_nan
+        # split again
+        clean_imu_data = clean_merged_data[:, :17 * 12]  # [seq_len, 204]
+        clean_gt_data = clean_merged_data[:, 17 * 12:]  # [seq_len, 72]
+        # output data [1, nb_imus, nb_imu_features]
+        print('--- file: {}, seq_len: {}, imu_data: {}, gt_data: {}'.format(
+            f, new_seq_len, clean_imu_data.shape, clean_gt_data.shape))
+
+        for i in range(new_seq_len):
+            imu_out.append(clean_imu_data[i])  # [1, 204]
+            gt_out.append(clean_gt_data[i])  # [1, 72]
+
+    return imu_out, gt_out
+
+def process_datasets():
+    "Process training and testing IMU datasets"
+    path = imu_dataset_path + 'DIP_IMU/'
+    train_subjects = ['s_01', 's_02', 's_03', 's_04', 's_05', 's_06', 's_07', 's_08']
+    test_subjects = ['s_09', 's_10']
+    train_files, test_files = [], []
+    
+    print('Process IMU training data \n')
+    for s in train_subjects:
+            subject_path = os.path.join(path, '{}/'.format(s))
+            for f in os.listdir(subject_path):
+                if f.endswith('.pkl'):
+                    train_files.append(os.path.join(subject_path, f))
+                    
+    scaler = MaxAbsScaler()
+    imu_train, gt_train = get_data_chunks(train_files)
+    imu_train = np.squeeze(imu_train)
+    seq_len = len(imu_train)
+    ori_train = imu_train[:, :153]
+    # normalize acceleration
+    acc_train = imu_train[:, 153:]
+    acc_train_abs = scaler.fit_transform(acc_train)
+    imu_train = np.concatenate((ori_train, acc_train_abs), axis=1)
+    imu_train = np.reshape(imu_train, [seq_len, 1, 204])
+    print('Save train dataset to {}processed_train.npz'.format(imu_dataset_path))
+    np.savez(os.path.join(imu_dataset_path, 'processed_train.npz'), imu=imu_train, gt=gt_train)
+    
+    print('Process IMU testing data \n')
+    for s in test_subjects:
+            subject_path = os.path.join(path, '{}/'.format(s))
+            for f in os.listdir(subject_path):
+                if f.endswith('.pkl'):
+                    test_files.append(os.path.join(subject_path, f))
+    scaler = MaxAbsScaler()
+    imu_test, gt_test = get_data_chunks(test_files)
+    imu_test = np.squeeze(imu_test)
+    seq_len = len(imu_test)
+    ori_test = imu_test[:, :153]
+    # normalize acceleration
+    acc_test = imu_test[:, 153:]
+    acc_test_abs = scaler.fit_transform(acc_test)
+    imu_test = np.concatenate((ori_test, acc_test_abs), axis=1)
+    imu_test = np.reshape(imu_test, [seq_len, 1, 204])
+    print('Save test dataset to {}processed_test.npz'.format(imu_dataset_path))
+    np.savez(os.path.join(imu_dataset_path, 'processed_test.npz'), imu=imu_test, gt=gt_test)
+
+def load_datasets(batch_size=32, shuffle=True):
     """
     Load train and test datasets and return tf.data.Dataset loaders.
 
@@ -248,18 +334,22 @@ def generate_pose_animation(data_loader, color):
 if __name__ == '__main__':
     # Arg parser
     parser = argparse.ArgumentParser(description='Pose generator script')
+    parser.add_argument('--process', type=int, help='Pre-process datasets', default=1)
     parser.add_argument('--train', type=int, help='Train MLP model from scratch', default=0)
     parser.add_argument('--num_ep', type=int, help='Number of training epochs', default=50)
     parser.add_argument('--batch', type=int, help='Batch size', default=100)
     parser.add_argument('--ebno', type=float, 
                         help='Ebno (dB) value when running SMPL simulation at the receiver', 
-                        default=-5.0,
+                        default=5.0,
                         )
     parser.add_argument('--quantz', type=int, help='Quantization level', default=6)
     args = parser.parse_args()
     
+    if args.process:
+        process_datasets()
+        
     # Build datasets
-    train_loader, test_loader = load_dataset(batch_size=args.batch)
+    train_loader, _ = load_datasets(batch_size=args.batch)
     
     if args.train:
         model, history = train_mlp(
@@ -271,31 +361,44 @@ if __name__ == '__main__':
     batch_size = 5000
     color_list = [
         [140.0 / 255, 140.0 / 255, 140.0 / 255, 1.0],  # Ground truth - even darker gray
-        [120.0 / 255, 140.0 / 255, 180.0 / 255, 1.0],  # Neural-receiver - muted gray-blue
-        [200.0 / 255, 140.0 / 255, 120.0 / 255, 1.0],  # LS-estimation - darker soft orange 
-        [120.0 / 255, 160.0 / 255, 120.0 / 255, 1.0]   # Perfect-CSI - muted dark green
+        [120.0 / 255, 140.0 / 255, 180.0 / 255, 1.0],  # Neural-receiver-2p - muted gray-blue
+        [100.0 / 255, 120.0 / 255, 160.0 / 255, 1.0],  # Neural-receiver-1p - darker and slightly cooler
+        [200.0 / 255, 140.0 / 255, 120.0 / 255, 1.0],  # LS-estimation-2p - darker soft orange
+        [180.0 / 255, 120.0 / 255, 100.0 / 255, 1.0],   # LS-estimation-1p - less bright
+        [120.0 / 255, 160.0 / 255, 120.0 / 255, 1.0]  # Perfect-CSI - muted dark green
     ]
+    
+    # visualize TX data
+    tx_data = np.load('data/imu/ori_imu_{}_{}_{}.npy'.format('baseline-perfect-csi', args.quantz, args.ebno))
+    # qtz_data = np.load('data/imu/qtz_imu_{}_{}_{}_{}.npy'.format(system, args.quantz, args.ebno))
+    X_test = tx_data
+    print(f"Test Data: X_test shape: {X_test.shape}")
+    y_test = None
+    test_dataset = tf.data.Dataset.from_tensor_slices((X_test, y_test))
+    test_dataset = test_dataset.batch(batch_size).prefetch(buffer_size=tf.data.AUTOTUNE)
+    # screenshot frames: 173, 510
+    generate_pose_animation(test_dataset, color_list[0])
 
-    for system in ['neural-receiver', 'baseline-ls-estimation', 'baseline-perfect-csi']:  # 'baseline-ls-estimation', 'baseline-perfect-csi'
-        tx_data = np.load('data/imu/ori_imu_{}_{}_{}.npy'.format(system, args.quantz, args.ebno))
-        qtz_data = np.load('data/imu/qtz_imu_{}_{}_{}.npy'.format(system, args.quantz, args.ebno))
+    # visualize RX data
+    for system in ['neural-receiver_2p', 'neural-receiver_1p', 'baseline-ls-estimation_2p', 'baseline-ls-estimation_1p' , 'baseline-perfect-csi']: 
         rx_data = np.load('data/imu/rec_imu_{}_{}_{}.npy'.format(system, args.quantz, args.ebno))
         print('rx data shape: {}'.format(rx_data.shape))
-        data_list = [tx_data, qtz_data, rx_data]
-        for i in range(len(data_list)):
-            if i == 0 or i == 1:
-                color = color_list[0]
-            else:
-                if system == 'neural-receiver':
-                    color = color_list[1]
-                elif system == 'baseline-ls-estimation':
-                    color = color_list[2]
-                elif system == 'baseline-perfect-csi':
-                    color = color_list[3]
-            X_test = data_list[i]
-            print(f"Test Data: X_test shape: {X_test.shape}")
-            y_test = None
-            test_dataset = tf.data.Dataset.from_tensor_slices((X_test, y_test))
-            test_dataset = test_dataset.batch(batch_size).prefetch(buffer_size=tf.data.AUTOTUNE)
-            # screenshot frames: 173, 510
-            generate_pose_animation(test_dataset, color)
+        if system == 'neural-receiver_2p':
+            color = color_list[1]
+        elif system == 'neural-receiver_1p':
+            color = color_list[2]
+        elif system == 'baseline-ls-estimation_2p':
+            color = color_list[3]
+        elif system == 'baseline-ls-estimation_1p':
+            color = color_list[4]
+        elif system == 'baseline-perfect-csi':
+            color = color_list[5]
+            
+        X_test = rx_data
+        print(f"Test Data: X_test shape: {X_test.shape}")
+        y_test = None
+        test_dataset = tf.data.Dataset.from_tensor_slices((X_test, y_test))
+        test_dataset = test_dataset.batch(batch_size).prefetch(buffer_size=tf.data.AUTOTUNE)
+        # screenshot frames: 173, 510
+        generate_pose_animation(test_dataset, color)
+        del rx_data, test_dataset
