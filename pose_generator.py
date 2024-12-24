@@ -1,4 +1,5 @@
 import os
+import sys
 import platform
 import argparse
 import pickle as pkl
@@ -334,7 +335,7 @@ def generate_pose_animation(data_loader, color):
 if __name__ == '__main__':
     # Arg parser
     parser = argparse.ArgumentParser(description='Pose generator script')
-    parser.add_argument('--process', type=int, help='Pre-process datasets', default=1)
+    parser.add_argument('--process', type=int, help='Pre-process datasets', default=0)
     parser.add_argument('--train', type=int, help='Train MLP model from scratch', default=0)
     parser.add_argument('--num_ep', type=int, help='Number of training epochs', default=50)
     parser.add_argument('--batch', type=int, help='Batch size', default=100)
@@ -347,6 +348,7 @@ if __name__ == '__main__':
     
     if args.process:
         process_datasets()
+        sys.exit()
         
     # Build datasets
     train_loader, _ = load_datasets(batch_size=args.batch)
@@ -369,7 +371,7 @@ if __name__ == '__main__':
     ]
     
     # visualize TX data
-    tx_data = np.load('data/imu/ori_imu_{}_{}_{}.npy'.format('baseline-perfect-csi', args.quantz, args.ebno))
+    tx_data = np.load('data/imu/ori_imu_{}_{}_{}.npy'.format('neural-receiver_1p', args.quantz, args.ebno))
     # qtz_data = np.load('data/imu/qtz_imu_{}_{}_{}_{}.npy'.format(system, args.quantz, args.ebno))
     X_test = tx_data
     print(f"Test Data: X_test shape: {X_test.shape}")
