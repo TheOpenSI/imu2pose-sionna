@@ -101,7 +101,7 @@ def generate_channel_impulse_responses(scene, map_name, num_cirs, batch_size_cir
         tx_position = [-210, 73, 105] # [-210, 73, 105] / [8.5, 21, 27]]
         rx_position = [55, 80, 1.5]
         tx_look_at = rx_position
-        my_cam = Camera("my_cam", position=[-400, 250, 150], look_at=[-15, 30, 28])
+        my_cam = Camera("my_cam", position=[-350, 200, 150], look_at=[-15, 30, 28])
         
     scene = configure_antennas(
         scene, map_name, num_tx_ant=num_tx_ant, num_rx_ant=num_rx_ant, 
@@ -109,13 +109,50 @@ def generate_channel_impulse_responses(scene, map_name, num_cirs, batch_size_cir
         )
     scene.add(my_cam)
     sample_paths = scene.compute_paths(max_depth=5, num_samples=1e6)
+    # Apply Doppler shifts
+    sample_paths.apply_doppler(sampling_frequency=rg.subcarrier_spacing, # Set to 15e3 Hz
+                        num_time_steps=14, # Number of OFDM symbols
+                        tx_velocities=[0.0, 0.0, 0.0],
+                        rx_velocities=[
+                            np.random.uniform(13.6, 18.8), 
+                            np.random.uniform(13.6, 18.8), 
+                            0.0]
+                        )
     scene.render_to_file(
         "my_cam", paths=sample_paths, show_devices=True, show_paths=True, 
         resolution=[650, 500], filename='data/figures/scene_{}.png'.format(map_name)
         )
     print('Rendered ray tracing scene to data/figures/scene_{}.png'.format(map_name))
     # render_scene(scene, paths=sample_paths)
-    del sample_paths
+    a, tau = sample_paths.cir()
+    t = tau[0, 0, 0, :]
+    a_abs = np.abs(a)[0,0,0,0,0,:,0]
+    a_max = np.max(a_abs)
+    # Add dummy entry at start/end for nicer figure
+    t = np.concatenate([(0.,), t, (np.max(t)*1.1,)])
+    a_abs = np.concatenate([(np.nan,), a_abs, (np.nan,)])
+    
+    plt.figure(figsize=(4, 3))
+    plt.title("Channel impulse response realization")
+    plt.stem(t, a_abs)
+    # plt.xlim([0, np.max(t)])
+    # plt.ylim([-2e-6, a_max*1.1])
+    plt.xlabel(r"$\tau$ [ns]", fontsize=17)
+    plt.ylabel(r"$|a|$", fontsize=17)
+    plt.xticks(fontsize=15)
+    plt.yticks(fontsize=15)
+    plt.grid('--')
+    plt.subplots_adjust(left=0.15,
+                        bottom=0.2,
+                        right=0.97,
+                        top=0.85,
+                        wspace=0.2,
+                        hspace=0.37
+                        )
+    plt.savefig('data/figures/cir_{}.pdf'.format(map_name))
+    plt.close()
+    print('Rendered channel impulse response to data/figures/cir_{}.pdf'.format(map_name))
+    del sample_paths, a, tau
     
     # Remove old tx from scene
     scene.remove('tx')
@@ -378,7 +415,7 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0, scenario='2p
     if gen_data:
         # Create scene with transmitters/receivers
         # Creating all scenes and datasets
-        for map_name in ['etoile', 'munich']:
+        for map_name in ['munich', 'etoile']:
             scene, _ = load_3d_map(map_name=map_name, render=False)
             # Customized channel
             rg = ResourceGrid(

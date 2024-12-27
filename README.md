@@ -61,7 +61,7 @@ The BER plot will be saved in `data/figures` and the BER numpy file will be save
 
 To obtain MSE plot, run:
 ```
-python main.py --eval_mode 2
+python main.py --eval_mode 3
 ```
 The MSE plot and numpy file will be saved in similar folders. 
 
