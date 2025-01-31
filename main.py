@@ -61,9 +61,9 @@ def plot_figure(metric='ber'):
     
     plt.semilogy(x_range, data['neural-receiver-2p'], 's-', c=f'C0', label=f'Neural Receiver - 2P')
     plt.semilogy(x_range, data['neural-receiver-1p'], 's-', c=f'C1', label=f'Neural Receiver - 1P')
-    plt.semilogy(x_range, data['baseline-ls-estimation-2p'], '*--', c=f'C2', label=f'LS Estimation - 2P')
-    plt.semilogy(x_range, data['baseline-ls-estimation-1p'], '*--', c=f'C3', label=f'LS Estimation - 1P')
-    plt.semilogy(x_range, data['baseline-perfect-csi'], 'o--', c=f'C4', label=f'Perfect CSI') 
+    plt.semilogy(x_range, data['baseline-ls-estimation-2p'], '*--', c=f'C2', label=f'LS-LMMSE Receiver - 2P')
+    plt.semilogy(x_range, data['baseline-ls-estimation-1p'], '*--', c=f'C3', label=f'LS-LMMSE Receiver - 1P')
+    plt.semilogy(x_range, data['baseline-perfect-csi'], 'o--', c=f'C4', label=f'Perfect-CSI Receiver') 
 
     if metric == 'ber':
         plt.xlabel(r"$E_b/N_0$ (dB)", fontsize=18)
@@ -80,9 +80,9 @@ def plot_figure(metric='ber'):
     plt.legend(fontsize=12, framealpha=0.5)
     plt.tight_layout()
     if metric == 'ber':
-        plt.savefig('data/figures/ber.png')
+        plt.savefig('data/figures/ber.pdf')
     else:
-        plt.savefig('data/figures/mse.png')
+        plt.savefig('data/figures/mse.pdf')
 
 def generate_channel_impulse_responses(scene, map_name, num_cirs, batch_size_cir, rg, num_tx_ant, num_rx_ant, num_paths, uplink=True):
     max_depth = 5
