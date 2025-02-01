@@ -67,12 +67,20 @@ The MSE plot and numpy file will be saved in similar folders.
 
 Note that the MSE simulation also return many `npy` files in `data/imu`, such as `rec_imu_neural-receiver_7_5.0.npy`. These files will be used for later animation.
 
-To redraw the BER and MSE plots, run:
+To obtain MPJAE plot, run: 
+```
+python pose_generator.py --train 0 --jae_sim 1 
+```
+
+To redraw the BER, MSE, and MPJAE plots, run:
 ```
 python main.py --plot ber
 ```
 ```
 python main.py --plot mse
+```
+```
+python main.py --plot mpjae
 ```
 
 ### 5. Animation 

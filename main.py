@@ -47,8 +47,10 @@ if not os.path.isdir('data/imu'):
 def plot_figure(metric='ber'):
     if metric == 'ber':
         data = np.load('data/pltdata/bler.npy', allow_pickle=True)
-    else:
+    elif metric == 'mse':
         data = np.load('data/pltdata/mse.npy', allow_pickle=True)
+    else:
+        data = np.load('data/pltdata/mpjae.npy', allow_pickle=True)
     data = data.item()
     for key, value in data.items():
         print('{}: {}'.format(key, value))
@@ -68,9 +70,12 @@ def plot_figure(metric='ber'):
     if metric == 'ber':
         plt.xlabel(r"$E_b/N_0$ (dB)", fontsize=18)
         plt.ylabel("BER", fontsize=18)
-    else:
+    elif metric == 'mse':
         plt.xlabel("Quantization level", fontsize=18)
         plt.ylabel("MSE", fontsize=18)
+    else:
+        plt.xlabel("Quantization level", fontsize=18)
+        plt.ylabel("MPJAE", fontsize=18)
         
     plt.xticks(fontsize=15)
     plt.yticks(fontsize=15)
@@ -81,8 +86,10 @@ def plot_figure(metric='ber'):
     plt.tight_layout()
     if metric == 'ber':
         plt.savefig('data/figures/ber.pdf')
-    else:
+    elif metric == 'mse':
         plt.savefig('data/figures/mse.pdf')
+    else:
+        plt.savefig('data/figures/mpjae.pdf')
 
 def generate_channel_impulse_responses(scene, map_name, num_cirs, batch_size_cir, rg, num_tx_ant, num_rx_ant, num_paths, uplink=True):
     max_depth = 5
@@ -366,10 +373,10 @@ def mse_simulation(quantization_range, ebnodb_range, ofdm_params, model_params, 
     plt.semilogy(quantization_range, MSE['neural-receiver-2p'], 's-', c=f'C0', label=f'Neural Receiver - 2P')
     plt.semilogy(quantization_range, MSE['neural-receiver-1p'], 's-', c=f'C1', label=f'Neural Receiver - 1P')
     # Baseline - LS Estimation
-    plt.semilogy(quantization_range, MSE['baseline-ls-estimation-2p'], '*--', c=f'C2', label=f'LS Estimation - 2P')
-    plt.semilogy(quantization_range, MSE['baseline-ls-estimation-1p'], '*--', c=f'C3', label=f'LS Estimation - 1P')
+    plt.semilogy(quantization_range, MSE['baseline-ls-estimation-2p'], '*--', c=f'C2', label=f'LS-LMMSE Receiver - 2P')
+    plt.semilogy(quantization_range, MSE['baseline-ls-estimation-1p'], '*--', c=f'C3', label=f'LS-LMMSE Receiver- 1P')
     # Baseline - Perfect CSI
-    plt.semilogy(quantization_range, MSE['baseline-perfect-csi'], 'o--', c=f'C4', label=f'Baseline - Perfect CSI')
+    plt.semilogy(quantization_range, MSE['baseline-perfect-csi'], 'o--', c=f'C4', label=f'Baseline-Perfect CSI')
     plt.xlabel("Quatization level", fontsize=18)
     plt.ylabel("MSE", fontsize=18)
     plt.xticks(fontsize=15)
@@ -377,7 +384,7 @@ def mse_simulation(quantization_range, ebnodb_range, ofdm_params, model_params, 
     plt.grid(which="both")
     plt.legend(fontsize=13)
     plt.tight_layout()
-    plt.savefig('data/figures/mse.png')
+    plt.savefig('data/figures/mse.pdf')
         
     print(MSE)
     

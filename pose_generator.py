@@ -8,6 +8,7 @@ import smplx
 import numpy as np
 import pyvista as pv
 import tensorflow as tf
+import matplotlib.pyplot as plt
 from sklearn.preprocessing import MaxAbsScaler
 from tensorflow.keras.layers import Dense, Input
 from tensorflow.keras.models import Model
@@ -331,12 +332,102 @@ def generate_pose_animation(data_loader, color):
     aitview(pose=pose, faces=faces, color=color)
     # render_mesh(vertices, faces, animation=True, color='vae')
     
+def get_joint_rotation(pose_vector, joint_index):
+    """Extracts the 3D axis-angle rotation for a given joint."""
+    return pose_vector[3 * joint_index : 3 * (joint_index + 1)]    
+
+def angular_distance(omega_gt, omega_pred):
+    """Computes the angular error for each joint."""
+    omega_gt = np.array(omega_gt)  # Convert list of lists to NumPy array
+    omega_pred = np.array(omega_pred)
+
+    if omega_gt.shape != omega_pred.shape:
+        raise ValueError(f"Shape mismatch: omega_gt has shape {omega_gt.shape}, omega_pred has shape {omega_pred.shape}")
+
+    return np.linalg.norm(omega_gt - omega_pred, axis=1)  # Compute L2 norm per joint
+
+
+def mpjae_simulation(quantization_range, batch_size):
+    """
+    Simulate Mean Per Joint Angular Error (MPJAE) for the baselines
+    """
+    MPJAE = {}
+    EbNo = 5.0
+    num_joints = 24
+    smpl_mlp = tf.keras.models.load_model('data/weights/mlp_smpl.h5')
+
+    print('Running MPJAE simulation ...')
+    
+    for system in ['baseline-perfect-csi','neural-receiver', 'baseline-ls-estimation']: 
+        for scenario in ['1p', '2p']:
+            mpjae_system = []
+            for i, ql in enumerate(quantization_range):
+                tx_data = np.load('data/imu/ori_imu_{}_{}_{}_{}.npy'.format(system, scenario, ql, EbNo))
+                tx_dataset = tf.data.Dataset.from_tensor_slices((tx_data, None))
+                tx_dataset = tx_dataset.batch(batch_size).prefetch(buffer_size=tf.data.AUTOTUNE)
+
+                rx_data = np.load('data/imu/rec_imu_{}_{}_{}_{}.npy'.format(system, scenario, ql, EbNo))
+                rx_dataset = tf.data.Dataset.from_tensor_slices((rx_data, None))
+                rx_dataset = rx_dataset.batch(batch_size).prefetch(buffer_size=tf.data.AUTOTUNE)
+                
+                mpjae_batch = []
+                for ori_imu, rec_imu in zip(tx_dataset, rx_dataset):
+                    ori_imu, _ = ori_imu
+                    rec_imu, _ = rec_imu
+                    gt_pose = smpl_mlp(ori_imu).numpy()  # [batch_size, 72]
+                    rec_pose = smpl_mlp(rec_imu).numpy()
+                    
+                    # Extract all joint rotations as NumPy arrays
+                    
+                    for g_p, r_p in zip(gt_pose, rec_pose):
+                        omega_gt = np.array([get_joint_rotation(g_p, i) for i in range(num_joints)])
+                        omega_pred = np.array([get_joint_rotation(r_p, i) for i in range(num_joints)])
+                        
+                        # print("omega_gt shape:", omega_gt.shape)  # Should be (23, 3)
+                        # print("omega_pred shape:", omega_pred.shape)  # Should be (23, 3)   
+                        
+                        # Compute per-joint angular errors
+                        angular_errors = angular_distance(omega_gt, omega_pred)
+
+                        # Compute mean angular error across all joints
+                        mpjae_batch.append(angular_errors)
+                        # print('mpjae: {}'.format(mpjae))
+                mpjae_system.append(np.mean(mpjae_batch))
+            print('---- MPJEA: {}-{}: {}'.format(system, scenario, np.mean(mpjae_system)))   
+            if system != 'baseline-perfect-csi':
+                MPJAE[system + '-' + scenario] = mpjae_system
+            else:
+                MPJAE[system] = mpjae_system
+                
+    print('MPJAE: {}'.format(MPJAE))
+    np.save('data/pltdata/mpjae.npy', MPJAE)
+    
+    plt.figure()
+    # Neural receiver
+    plt.semilogy(quantization_range, MPJAE['neural-receiver-2p'], 's-', c=f'C0', label=f'Neural Receiver - 2P')
+    plt.semilogy(quantization_range, MPJAE['neural-receiver-1p'], 's-', c=f'C1', label=f'Neural Receiver - 1P')
+    # Baseline - LS Estimation
+    plt.semilogy(quantization_range, MPJAE['baseline-ls-estimation-2p'], '*--', c=f'C2', label=f'LS-LMMSE Receiver - 2P')
+    plt.semilogy(quantization_range, MPJAE['baseline-ls-estimation-1p'], '*--', c=f'C3', label=f'LS-LMMSE Receiver - 1P')
+    # Baseline - Perfect CSI
+    plt.semilogy(quantization_range, MPJAE['baseline-perfect-csi'], 'o--', c=f'C4', label=f'Perfect-CSI Receiver')
+    plt.xlabel("Quatization level", fontsize=18)
+    plt.ylabel("MPJAE", fontsize=18)
+    plt.xticks(fontsize=15)
+    plt.yticks(fontsize=15)
+    plt.grid(which="both")
+    plt.legend(fontsize=13)
+    plt.tight_layout()
+    plt.savefig('data/figures/mpjae.pdf')
+        
+    print(MPJAE)
 
 if __name__ == '__main__':
     # Arg parser
     parser = argparse.ArgumentParser(description='Pose generator script')
     parser.add_argument('--process', type=int, help='Pre-process datasets', default=0)
     parser.add_argument('--train', type=int, help='Train MLP model from scratch', default=0)
+    parser.add_argument('--jae_sim', type=int, help='Simulate MPJAE', default=1)
     parser.add_argument('--num_ep', type=int, help='Number of training epochs', default=50)
     parser.add_argument('--batch', type=int, help='Batch size', default=100)
     parser.add_argument('--ebno', type=float, 
@@ -359,6 +450,10 @@ if __name__ == '__main__':
             input_dim=204, output_dim=72,
             epochs=args.num_ep, batch_size=args.batch
             )
+        
+    if args.jae_sim:
+        quantz_range = np.arange(4, 11, 1, dtype=int)
+        mpjae_simulation(quantz_range, args.batch)
     
     batch_size = 5000
     color_list = [
@@ -376,10 +471,10 @@ if __name__ == '__main__':
     X_test = tx_data
     print(f"Test Data: X_test shape: {X_test.shape}")
     y_test = None
-    test_dataset = tf.data.Dataset.from_tensor_slices((X_test, y_test))
-    test_dataset = test_dataset.batch(batch_size).prefetch(buffer_size=tf.data.AUTOTUNE)
+    tx_dataset = tf.data.Dataset.from_tensor_slices((X_test, y_test))
+    tx_dataset = tx_dataset.batch(batch_size).prefetch(buffer_size=tf.data.AUTOTUNE)
     # screenshot frames: 173, 510
-    generate_pose_animation(test_dataset, color_list[0])
+    generate_pose_animation(tx_dataset, color_list[0])
 
     # visualize RX data
     for system in ['neural-receiver_2p', 'neural-receiver_1p', 'baseline-ls-estimation_2p', 'baseline-ls-estimation_1p' , 'baseline-perfect-csi']: 
@@ -399,8 +494,8 @@ if __name__ == '__main__':
         X_test = rx_data
         print(f"Test Data: X_test shape: {X_test.shape}")
         y_test = None
-        test_dataset = tf.data.Dataset.from_tensor_slices((X_test, y_test))
-        test_dataset = test_dataset.batch(batch_size).prefetch(buffer_size=tf.data.AUTOTUNE)
+        rx_dataset = tf.data.Dataset.from_tensor_slices((X_test, y_test))
+        rx_dataset = rx_dataset.batch(batch_size).prefetch(buffer_size=tf.data.AUTOTUNE)
         # screenshot frames: 173, 510
-        generate_pose_animation(test_dataset, color)
-        del rx_data, test_dataset
+        generate_pose_animation(rx_dataset, color)
+        del rx_data, rx_dataset
