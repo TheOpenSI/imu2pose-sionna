@@ -71,10 +71,10 @@ def plot_figure(metric='ber'):
         plt.xlabel(r"$E_b/N_0$ (dB)", fontsize=18)
         plt.ylabel("BER", fontsize=18)
     elif metric == 'mse':
-        plt.xlabel("Quantization level", fontsize=18)
+        plt.xlabel("Quantization level (bits)", fontsize=18)
         plt.ylabel("MSE", fontsize=18)
     else:
-        plt.xlabel("Quantization level", fontsize=18)
+        plt.xlabel("Quantization level (bits)", fontsize=18)
         plt.ylabel("MPJAE", fontsize=18)
         
     plt.xticks(fontsize=15)
