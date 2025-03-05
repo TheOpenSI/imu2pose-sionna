@@ -1,8 +1,17 @@
-## Human pose reconstruction from IMUs over 5G-OFDM neural receiver
+## End-to-End Human Pose Reconstruction from Wearable Sensors for 6G Extended Reality Systems
+This is the source code for the paper "End-to-End Human Pose Reconstruction from Wearable Sensors for 6G Extended Reality Systems".  
+Authors: N. Q. Hieu, D. T. Hoang, D. N. Nguyen, M. A. Alsheikh, C. C. N. Kuhn, Y. F. Alem, and I. Radwan.
 
 ### 1. Dependency
-Install `numpy`, `matplotlib`, `tensorflow`, `sionna`, `sionna-vispy`, `torch`, `smplx`, `scikit-learn`, `aitviewer`, `chumpy`:
-
+Using Python 3.9, create a virtual environment:  
+```python
+python3 -m venv venv
+```
+Activate the virtual environment `venv`:  
+```bash
+source venv/bin/activate
+```
+Install the dependencies with `pip`:    
 ```
 pip install -r requirements.txt
 ```
