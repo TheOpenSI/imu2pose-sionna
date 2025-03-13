@@ -1,6 +1,6 @@
 ## End-to-End Human Pose Reconstruction from Wearable Sensors for 6G Extended Reality Systems
 This is the source code for the paper "End-to-End Human Pose Reconstruction from Wearable Sensors for 6G Extended Reality Systems".  
-Authors: N. Q. Hieu, D. T. Hoang, D. N. Nguyen, M. A. Alsheikh, C. C. N. Kuhn, Y. F. Alem, and I. Radwan.
+Authors: N. Q. Hieu, D. T. Hoang, D. N. Nguyen, M. A. Alsheikh, C. C. N. Kuhn, Y. F. Alem, and I. Radwan.  
 Arxiv: https://arxiv.org/abs/2503.04860
 
 ### 1. Dependency
