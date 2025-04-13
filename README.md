@@ -53,10 +53,10 @@ For this, let's copy and rename file from `~/datasets/SMPLs/models/smpl/models/b
 ### 3. Training neural receiver
 Run the following commands to train the neural receiver in 100000 iterations from scratch:
 ```
-python main.py --eval_mode 0 --train --num_ep 100000 --scenario 2p
+python main.py --eval_mode 0 --num_ep 100000 --scenario 2p
 ```
 ```
-python main.py --eval_mode 0 --train --num_ep 100000 --scenario 1p
+python main.py --eval_mode 0 --num_ep 100000 --scenario 1p
 ```
 where `--scenario 2p` and `--scenario 1p` are for two scenarios of different pilot configuration, as described in the paper.
 
