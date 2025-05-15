@@ -578,7 +578,7 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0, scenario='2p
             plt.tight_layout()
             plt.savefig('data/figures/ber.png')
             
-        else:
+        elif eval_mode == 3:
             # MSE simulation with customized IMU data
             quantz_range = np.arange(4, 11, 1, dtype=int)
             ebno_db_range = np.arange(5, 10, 5, dtype=float)
