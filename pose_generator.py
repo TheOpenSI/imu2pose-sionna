@@ -427,7 +427,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Pose generator script')
     parser.add_argument('--process', type=int, help='Pre-process datasets', default=0)
     parser.add_argument('--train', type=int, help='Train MLP model from scratch', default=0)
-    parser.add_argument('--jae_sim', type=int, help='Simulate MPJAE', default=1)
+    parser.add_argument('--jae_sim', type=int, help='Simulate MPJAE', default=0)
     parser.add_argument('--num_ep', type=int, help='Number of training epochs', default=50)
     parser.add_argument('--batch', type=int, help='Batch size', default=100)
     parser.add_argument('--ebno', type=float, 
