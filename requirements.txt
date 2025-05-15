@@ -1,13 +1,11 @@
+# python3.9
 sionna==0.19.0
-sionna-vispy==0.18.0.1
 tensorflow==2.15.1
-scikit-learn
-numpy
-matplotlib    
-smplx
-aitviewer
-chumpy
-torch
-pyvista
-
-# pip uninstall nvidia-cublas-cu12 nvidia-cuda-cupti-cu12 nvidia-cuda-nvcc-cu12 nvidia-cuda-nvrtc-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 nvidia-cufft-cu12 nvidia-curand-cu12 nvidia-cusolver-cu12 nvidia-cusparse-cu12 nvidia-nccl-cu12 nvidia-nvjitlink-cu12
+scikit-learn==1.6.1
+numpy==1.26.4
+matplotlib==3.9.4    
+smplx==0.1.28
+aitviewer==1.13.0
+chumpy==0.70
+torch==2.6.0 --index-url https://download.pytorch.org/whl/torch_stable.html
+mitsuba==3.5.2
