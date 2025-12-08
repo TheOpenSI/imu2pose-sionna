@@ -10,3 +10,4 @@ chumpy==0.70
 torch==2.6.0 --index-url https://download.pytorch.org/whl/torch_stable.html
 mitsuba==3.5.2
 moderngl-window==2.4.6
+pyvista==0.46.4

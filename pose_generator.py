@@ -347,21 +347,85 @@ def angular_distance(omega_gt, omega_pred):
     return np.linalg.norm(omega_gt - omega_pred, axis=1)  # Compute L2 norm per joint
 
 
+def batch_rodrigues_numpy(rot_vecs):
+    """
+    Convert a batch of axis-angle vectors to rotation matrices using Rodrigues' formula.
+    Args:
+        rot_vecs: (N, 3) array of axis-angle vectors
+    Returns:
+        R: (N, 3, 3) array of rotation matrices
+    """
+    theta = np.linalg.norm(rot_vecs, axis=1, keepdims=True)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        k = rot_vecs / theta
+    k = np.nan_to_num(k) # handle 0 division (theta=0)
+    
+    kx = k[:, 0]
+    ky = k[:, 1]
+    kz = k[:, 2]
+    
+    ct = np.cos(theta).squeeze()
+    st = np.sin(theta).squeeze()
+    vt = 1 - ct
+    
+    N = rot_vecs.shape[0]
+    R = np.zeros((N, 3, 3))
+    
+    # Fill diagonal
+    R[:, 0, 0] = ct + kx**2 * vt
+    R[:, 1, 1] = ct + ky**2 * vt
+    R[:, 2, 2] = ct + kz**2 * vt
+    
+    # Fill off-diagonal
+    R[:, 0, 1] = kx * ky * vt - kz * st
+    R[:, 0, 2] = kx * kz * vt + ky * st
+    R[:, 1, 0] = kx * ky * vt + kz * st
+    R[:, 1, 2] = ky * kz * vt - kx * st
+    R[:, 2, 0] = kx * kz * vt - ky * st
+    R[:, 2, 1] = ky * kz * vt + kx * st
+    
+    return R
+
+def compute_geodesic_error(v1, v2):
+    """
+    Compute the geodesic distance (in degrees) between two batches of axis-angle vectors.
+    Formula: theta = arccos( (Tr(R_diff) - 1) / 2 )
+    """
+    R1 = batch_rodrigues_numpy(v1)
+    R2 = batch_rodrigues_numpy(v2)
+    
+    # Calculate R_diff = R1 @ R2.T
+    # Einsum is efficient for batch matrix multiplication
+    # 'nij,nkj->nik' equates to R1[n] dot R2[n].T
+    R_diff = np.einsum('nij,nkj->nik', R1, R2) 
+    
+    # Compute trace: sum of diagonal elements
+    trace = np.trace(R_diff, axis1=1, axis2=2)
+    
+    # Clamp trace to valid range [-1, 3] to avoid numerical errors with arccos
+    # Trace of R is 1 + 2cos(theta), so it lies in [-1, 3]
+    val = (trace - 1.0) / 2.0
+    val = np.clip(val, -1.0, 1.0)
+    
+    theta = np.arccos(val)
+    
+    return np.degrees(theta)
+
 def mpjae_simulation(quantization_range, batch_size):
     """
-    Simulate Mean Per Joint Angular Error (MPJAE) for the baselines
+    Simulate Mean Per Joint Angular Error (MPJAE) using Geodesic Distance.
     """
     MPJAE = {}
     EbNo = 5.0
-    num_joints = 24
     smpl_mlp = tf.keras.models.load_model('data/weights/mlp_smpl.h5')
 
-    print('Running MPJAE simulation ...')
+    print('Running MPJAE simulation (Geodesic Metric)...')
     
     for system in ['baseline-perfect-csi','neural-receiver', 'baseline-ls-estimation']: 
         for scenario in ['1p', '2p']:
             mpjae_system = []
             for i, ql in enumerate(quantization_range):
+                # Load data
                 tx_data = np.load('data/imu/ori_imu_{}_{}_{}_{}.npy'.format(system, scenario, ql, EbNo))
                 tx_dataset = tf.data.Dataset.from_tensor_slices((tx_data, None))
                 tx_dataset = tx_dataset.batch(batch_size).prefetch(buffer_size=tf.data.AUTOTUNE)
@@ -370,38 +434,43 @@ def mpjae_simulation(quantization_range, batch_size):
                 rx_dataset = tf.data.Dataset.from_tensor_slices((rx_data, None))
                 rx_dataset = rx_dataset.batch(batch_size).prefetch(buffer_size=tf.data.AUTOTUNE)
                 
-                mpjae_batch = []
+                mpjae_all_samples = []
+                
+                # Iterate through batches
                 for ori_imu, rec_imu in zip(tx_dataset, rx_dataset):
                     ori_imu, _ = ori_imu
                     rec_imu, _ = rec_imu
-                    gt_pose = smpl_mlp(ori_imu).numpy()  # [batch_size, 72]
+                    
+                    # Predict poses [Batch_Size, 72]
+                    gt_pose = smpl_mlp(ori_imu).numpy()
                     rec_pose = smpl_mlp(rec_imu).numpy()
                     
-                    # Extract all joint rotations as NumPy arrays
+                    # Reshape to [Batch_Size * 24_Joints, 3_Axis_Angle]
+                    # This allows us to compute geodesic error for all joints in the batch simultaneously
+                    gt_vecs = gt_pose.reshape(-1, 3)
+                    rec_vecs = rec_pose.reshape(-1, 3)
                     
-                    for g_p, r_p in zip(gt_pose, rec_pose):
-                        omega_gt = np.array([get_joint_rotation(g_p, i) for i in range(num_joints)])
-                        omega_pred = np.array([get_joint_rotation(r_p, i) for i in range(num_joints)])
-                        
-                        # print("omega_gt shape:", omega_gt.shape)  # Should be (23, 3)
-                        # print("omega_pred shape:", omega_pred.shape)  # Should be (23, 3)   
-                        
-                        # Compute per-joint angular errors
-                        angular_errors = angular_distance(omega_gt, omega_pred)
-
-                        # Compute mean angular error across all joints
-                        mpjae_batch.append(angular_errors)
-                        # print('mpjae: {}'.format(mpjae))
-                mpjae_system.append(np.mean(mpjae_batch))
-            print('---- MPJEA: {}-{}: {}'.format(system, scenario, np.mean(mpjae_system)))   
+                    # Compute Geodesic Error in degrees
+                    errors = compute_geodesic_error(gt_vecs, rec_vecs)
+                    
+                    mpjae_all_samples.append(errors)
+                
+                # Combine all errors from all batches
+                all_errors = np.concatenate(mpjae_all_samples)
+                mean_error = np.mean(all_errors)
+                
+                mpjae_system.append(mean_error)
+            
+            print('---- MPJAE (Geodesic): {}-{}: {}'.format(system, scenario, np.mean(mpjae_system)))   
             if system != 'baseline-perfect-csi':
                 MPJAE[system + '-' + scenario] = mpjae_system
             else:
                 MPJAE[system] = mpjae_system
                 
-    print('MPJAE: {}'.format(MPJAE))
+    print('MPJAE Results:', MPJAE)
     np.save('data/pltdata/mpjae.npy', MPJAE)
     
+    # Plotting
     plt.figure()
     # Neural receiver
     plt.semilogy(quantization_range, MPJAE['neural-receiver-2p'], 's-', c=f'C0', label=f'Neural Receiver - 2P')
@@ -411,8 +480,9 @@ def mpjae_simulation(quantization_range, batch_size):
     plt.semilogy(quantization_range, MPJAE['baseline-ls-estimation-1p'], '*--', c=f'C3', label=f'LS-LMMSE Receiver - 1P')
     # Baseline - Perfect CSI
     plt.semilogy(quantization_range, MPJAE['baseline-perfect-csi'], 'o--', c=f'C4', label=f'Perfect-CSI Receiver')
-    plt.xlabel("Quatization level", fontsize=18)
-    plt.ylabel("MPJAE", fontsize=18)
+    
+    plt.xlabel("Quantization level", fontsize=18)
+    plt.ylabel("MPJAE (deg)", fontsize=18) # Updated label
     plt.xticks(fontsize=15)
     plt.yticks(fontsize=15)
     plt.grid(which="both")

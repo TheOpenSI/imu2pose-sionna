@@ -6,11 +6,11 @@ Arxiv: https://arxiv.org/abs/2503.04860
 ### 1. Dependency
 Using Python 3.9, create a virtual environment:  
 ```python
-python3 -m venv venv
+python3 -m venv .venv
 ```
-Activate the virtual environment `venv`:  
+Activate the virtual environment `.venv`:  
 ```bash
-source venv/bin/activate
+source .venv/bin/activate
 ```
 Install the dependencies with `pip`:    
 ```
@@ -77,23 +77,15 @@ The MSE plot and numpy file will be saved in similar folders.
 
 Note that the MSE simulation also return many `npy` files in `data/imu`, such as `rec_imu_neural-receiver_7_5.0.npy`. These files will be used for later animation.
 
-To obtain MPJAE plot, run: 
-```
-python pose_generator.py --train 0 --jae_sim 1 
-```
-
-To redraw the BER, MSE, and MPJAE plots, run:
+To redraw the BER, and MSE, run:
 ```
 python main.py --plot ber
 ```
 ```
 python main.py --plot mse
 ```
-```
-python main.py --plot mpjae
-```
 
-### 5. Animation 
+### 5. Animation & MPJAE plot
 After obtaining `npy` files after MSE simulation, body movements can be visualized by using [aitviewer](https://github.com/eth-ait/aitviewer) tool.
 
 But first, we need to train an IMU receiver to convert the received IMU signal into the specific pose parameter. The pose parameter is then used as input of the SMPL model to return a set of vertices in 3D.
@@ -103,6 +95,16 @@ To train the IMU receiver, run:
 python pose_generator.py --train 1 --num_ep 50 --batch 100
 ```
 After training the IMU receiver for 50 epochs, the trained model will be saved in `data/weights/`.
+
+Once we obtain the pre-trained model for the IMU-receiver, let's evaluate the MPJAE:
+```python
+python pose_generator.py --train 0 --jae_sim 1 
+```
+
+To redraw the MPJAE plot, run:
+```python
+python main.py --plot mpjae
+```
 
 To visualize the body poses with 6-bit quatization at Eb/N0 = 5.0 dB, run:
 ```
