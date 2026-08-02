@@ -411,86 +411,78 @@ def compute_geodesic_error(v1, v2):
     
     return np.degrees(theta)
 
-def mpjae_simulation(quantization_range, batch_size):
+def mpjae_simulation(quantization_range, batch_size, channel, reference='gt'):
     """
-    Simulate Mean Per Joint Angular Error (MPJAE) using Geodesic Distance.
+    Simulate Mean Per Joint Angular Error (MPJAE) using the geodesic (SO(3)) metric.
+
+    reference:
+        'gt'    -> ABSOLUTE MPJAE: geodesic error between the pose predicted from the
+                   channel-distorted IMU and the dataset ground-truth SMPL pose. This is
+                   the standard pose-accuracy metric and is consistent with the temporal
+                   baseline comparison (Bi-RNN / LSTM, ref=gt).
+        'clean' -> RELATIVE MPJAE (paper Fig. 10 convention): geodesic error between the
+                   pose predicted from the distorted IMU and the pose predicted from the
+                   clean (original) IMU, i.e. the channel-induced degradation only.
     """
     MPJAE = {}
     EbNo = 5.0
     smpl_mlp = tf.keras.models.load_model('data/weights/mlp_smpl.h5')
 
-    print('Running MPJAE simulation (Geodesic Metric)...')
-    
-    for system in ['baseline-perfect-csi','neural-receiver', 'baseline-ls-estimation']: 
+    gt_all = None
+    if reference == 'gt':
+        # Dataset ground-truth SMPL poses, frame-aligned with the saved ori_imu arrays.
+        gt_all = np.asarray(np.load(imu_dataset_path + 'processed_test.npz',
+                                    allow_pickle=True)['gt'])
+
+    print('Running MPJAE simulation (Geodesic Metric, reference={})...'.format(reference))
+
+    for system in ['baseline-perfect-csi', 'neural-receiver', 'baseline-ls-estimation']:
         for scenario in ['1p', '2p']:
             mpjae_system = []
-            for i, ql in enumerate(quantization_range):
-                # Load data
-                tx_data = np.load('data/imu/ori_imu_{}_{}_{}_{}.npy'.format(system, scenario, ql, EbNo))
-                tx_dataset = tf.data.Dataset.from_tensor_slices((tx_data, None))
-                tx_dataset = tx_dataset.batch(batch_size).prefetch(buffer_size=tf.data.AUTOTUNE)
+            for ql in quantization_range:
+                # Load the clean (ori) and channel-distorted (rec) IMU signals
+                tx_data = np.load('data/imu/ori_imu_{}_{}_{}_{}_{}.npy'.format(channel, system, scenario, ql, EbNo))
+                rx_data = np.load('data/imu/rec_imu_{}_{}_{}_{}_{}.npy'.format(channel, system, scenario, ql, EbNo))
+                N = min(len(tx_data), len(rx_data))
+                tx_data = tx_data[:N].astype(np.float32)
+                rx_data = rx_data[:N].astype(np.float32)
 
-                rx_data = np.load('data/imu/rec_imu_{}_{}_{}_{}.npy'.format(system, scenario, ql, EbNo))
-                rx_dataset = tf.data.Dataset.from_tensor_slices((rx_data, None))
-                rx_dataset = rx_dataset.batch(batch_size).prefetch(buffer_size=tf.data.AUTOTUNE)
-                
-                mpjae_all_samples = []
-                
-                # Iterate through batches
-                for ori_imu, rec_imu in zip(tx_dataset, rx_dataset):
-                    ori_imu, _ = ori_imu
-                    rec_imu, _ = rec_imu
-                    
-                    # Predict poses [Batch_Size, 72]
-                    gt_pose = smpl_mlp(ori_imu).numpy()
-                    rec_pose = smpl_mlp(rec_imu).numpy()
-                    
-                    # Reshape to [Batch_Size * 24_Joints, 3_Axis_Angle]
-                    # This allows us to compute geodesic error for all joints in the batch simultaneously
-                    gt_vecs = gt_pose.reshape(-1, 3)
-                    rec_vecs = rec_pose.reshape(-1, 3)
-                    
-                    # Compute Geodesic Error in degrees
-                    errors = compute_geodesic_error(gt_vecs, rec_vecs)
-                    
-                    mpjae_all_samples.append(errors)
-                
-                # Combine all errors from all batches
-                all_errors = np.concatenate(mpjae_all_samples)
-                mean_error = np.mean(all_errors)
-                
-                mpjae_system.append(mean_error)
-            
-            print('---- MPJAE (Geodesic): {}-{}: {}'.format(system, scenario, np.mean(mpjae_system)))   
+                # Pose predicted from the channel-distorted IMU [N, 72]
+                rec_pose = smpl_mlp(rx_data, training=False).numpy()
+
+                # Reference pose
+                if reference == 'gt':
+                    ref_pose = np.asarray(gt_all[:N], dtype=np.float32)   # absolute: dataset GT
+                else:
+                    ref_pose = smpl_mlp(tx_data, training=False).numpy()  # relative: clean-input prediction
+
+                M = min(len(ref_pose), len(rec_pose))
+                # Reshape to [M * 24_joints, 3_axis_angle] and compute geodesic error (deg)
+                errors = compute_geodesic_error(ref_pose[:M].reshape(-1, 3),
+                                                rec_pose[:M].reshape(-1, 3))
+                mpjae_system.append(float(np.mean(errors)))
+
+            print('---- MPJAE (Geodesic, ref={}): {}-{}: {}'.format(
+                reference, system, scenario, np.mean(mpjae_system)))
             if system != 'baseline-perfect-csi':
                 MPJAE[system + '-' + scenario] = mpjae_system
             else:
                 MPJAE[system] = mpjae_system
-                
-    print('MPJAE Results:', MPJAE)
-    np.save('data/pltdata/mpjae.npy', MPJAE)
-    
-    # Plotting
-    plt.figure()
-    # Neural receiver
-    plt.semilogy(quantization_range, MPJAE['neural-receiver-2p'], 's-', c=f'C0', label=f'Neural Receiver - 2P')
-    plt.semilogy(quantization_range, MPJAE['neural-receiver-1p'], 's-', c=f'C1', label=f'Neural Receiver - 1P')
-    # Baseline - LS Estimation
-    plt.semilogy(quantization_range, MPJAE['baseline-ls-estimation-2p'], '*--', c=f'C2', label=f'LS-LMMSE Receiver - 2P')
-    plt.semilogy(quantization_range, MPJAE['baseline-ls-estimation-1p'], '*--', c=f'C3', label=f'LS-LMMSE Receiver - 1P')
-    # Baseline - Perfect CSI
-    plt.semilogy(quantization_range, MPJAE['baseline-perfect-csi'], 'o--', c=f'C4', label=f'Perfect-CSI Receiver')
-    
-    plt.xlabel("Quantization level", fontsize=18)
-    plt.ylabel("MPJAE (deg)", fontsize=18) # Updated label
-    plt.xticks(fontsize=15)
-    plt.yticks(fontsize=15)
-    plt.grid(which="both")
-    plt.legend(fontsize=13)
-    plt.tight_layout()
-    plt.savefig('data/figures/mpjae.pdf')
-        
+
+    print('MPJAE Results (ref={}):'.format(reference), MPJAE)
+    os.makedirs('data/pltdata', exist_ok=True)
+    os.makedirs('data/figures', exist_ok=True)
+    np.save('data/pltdata/mpjae_{}_{}.npy'.format(channel, reference), MPJAE)
+
+    # Plotting -- Fig. 12: MPJAE vs quantization (shared style, no title).
+    from plot_style import plot_receiver_combined, RX_QUANT
+    plot_receiver_combined(
+        list(quantization_range), MPJAE, RX_QUANT,
+        xlabel="Quantization level (bits)", ylabel=r"MPJAE ($^\circ$)",
+        out_path='data/figures/mpjae_{}_{}.pdf'.format(channel, reference))
+
     print(MPJAE)
+
 
 if __name__ == '__main__':
     # Arg parser
@@ -505,6 +497,16 @@ if __name__ == '__main__':
                         default=5.0,
                         )
     parser.add_argument('--quantz', type=int, help='Quantization level', default=6)
+    parser.add_argument('--channel', type=str, default='raytracing',
+                        choices=['raytracing', 'cdl', 'awgn'])
+    parser.add_argument('--reference', type=str, default='gt', choices=['gt', 'clean'],
+                        help="MPJAE reference: 'gt' = absolute error vs dataset ground-truth "
+                             "poses (default; matches the temporal-baseline comparison); "
+                             "'clean' = relative error vs the clean-input prediction (Fig. 10).")
+    parser.add_argument('--animate', type=int, default=0,
+                        help='Render aitviewer pose animations after MPJAE (off by default; '
+                             'the GL renderer crashes on teardown on macOS, so keep it 0 '
+                             'unless you specifically want the animations)')
     args = parser.parse_args()
     
     if args.process:
@@ -523,8 +525,15 @@ if __name__ == '__main__':
         
     if args.jae_sim:
         quantz_range = np.arange(4, 11, 1, dtype=int)
-        mpjae_simulation(quantz_range, args.batch)
-    
+        mpjae_simulation(quantz_range, args.batch, args.channel, reference=args.reference)
+
+    # The MPJAE results and figure are now saved (data/pltdata/mpjae_<channel>.npy,
+    # data/figures/mpjae_<channel>.pdf). The animation block below uses aitviewer/OpenGL,
+    # whose context teardown segfaults on macOS *after* all frames render successfully.
+    # Skip it unless --animate is set, and exit cleanly here.
+    if not args.animate:
+        sys.exit(0)
+
     batch_size = 5000
     color_list = [
         [140.0 / 255, 140.0 / 255, 140.0 / 255, 1.0],  # Ground truth - even darker gray
@@ -536,7 +545,7 @@ if __name__ == '__main__':
     ]
     
     # visualize TX data
-    tx_data = np.load('data/imu/ori_imu_{}_{}_{}.npy'.format('neural-receiver_1p', args.quantz, args.ebno))
+    tx_data = np.load('data/imu/ori_imu_{}_{}_{}_{}.npy'.format(args.channel, 'neural-receiver_1p', args.quantz, args.ebno))
     # qtz_data = np.load('data/imu/qtz_imu_{}_{}_{}_{}.npy'.format(system, args.quantz, args.ebno))
     X_test = tx_data
     print(f"Test Data: X_test shape: {X_test.shape}")
@@ -547,8 +556,15 @@ if __name__ == '__main__':
     generate_pose_animation(tx_dataset, color_list[0])
 
     # visualize RX data
-    for system in ['neural-receiver_2p', 'neural-receiver_1p', 'baseline-ls-estimation_2p', 'baseline-ls-estimation_1p' , 'baseline-perfect-csi']: 
-        rx_data = np.load('data/imu/rec_imu_{}_{}_{}.npy'.format(system, args.quantz, args.ebno))
+    for system in [
+        'neural-receiver_2p', 
+        # 'neural-receiver_1p', 
+        'baseline-ls-estimation_2p', 
+        # 'baseline-ls-estimation_1p', 
+        'baseline-perfect-csi_2p', 
+        # 'baseline-perfect-csi_1p'
+        ]: 
+        rx_data = np.load('data/imu/rec_imu_{}_{}_{}_{}.npy'.format(args.channel, system, args.quantz, args.ebno))
         print('rx data shape: {}'.format(rx_data.shape))
         if system == 'neural-receiver_2p':
             color = color_list[1]
@@ -558,7 +574,7 @@ if __name__ == '__main__':
             color = color_list[3]
         elif system == 'baseline-ls-estimation_1p':
             color = color_list[4]
-        elif system == 'baseline-perfect-csi':
+        elif system == 'baseline-perfect-csi_2p':
             color = color_list[5]
             
         X_test = rx_data
@@ -569,3 +585,8 @@ if __name__ == '__main__':
         # screenshot frames: 173, 510
         generate_pose_animation(rx_dataset, color)
         del rx_data, rx_dataset
+
+    # All animation frames have rendered. The aitviewer/OpenGL context teardown segfaults
+    # on macOS during interpreter shutdown, so terminate immediately to avoid the crash
+    # (everything we wanted is already written to disk).
+    os._exit(0)
