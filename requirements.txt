@@ -7,7 +7,7 @@ matplotlib==3.9.4
 smplx==0.1.28
 aitviewer==1.13.0
 chumpy==0.70
-torch==2.6.0 --index-url https://download.pytorch.org/whl/torch_stable.html
+torch==2.13.0 --index-url https://download.pytorch.org/whl/torch_stable.html
 mitsuba==3.5.2
 moderngl-window==2.4.6
 pyvista==0.46.4
