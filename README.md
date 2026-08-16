@@ -4,7 +4,7 @@ This is the source code for the paper "End-to-End Human Pose Reconstruction from
 
 Authors: N. Q. Hieu, D. T. Hoang, D. N. Nguyen, M. A. Alsheikh, C. C. N. Kuhn, Y. F. Alem, and I. Radwan.
 
-Arxiv: https://arxiv.org/abs/2503.04860
+IEEE: https://ieeexplore.ieee.org/document/11649545
 
 The sections below walk through the full pipeline in the order needed to reproduce the results in the paper: install dependencies, build the three datasets, train the neural receiver, run the evaluations, and reconstruct the poses. Each step lists the exact command with example parameters. A command-to-figure reference is given at the end.
 
