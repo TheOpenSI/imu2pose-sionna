@@ -12,6 +12,7 @@ from sionna.ofdm import ResourceGrid, ResourceGridMapper, RemoveNulledSubcarrier
 from sionna.mapping import Mapper, Demapper
 from sionna.utils import BinarySource, ebnodb2no, insert_dims, flatten_last_dims, log10, expand_to_rank
 from utils.imu_functions import prepare_source_data
+from fc_receiver import FCNeuralReceiver  
 
 os_name = platform.system()
 if os_name == 'Linux':
@@ -265,8 +266,16 @@ class E2ESystem(Model):
             # Components required by both baselines
             self._lmmse_equ = LMMSEEqualizer(self._rg, self._sm)
             self._demapper = Demapper("app", "qam", ofdm_params['num_bits_per_symbol'])
-        elif system == "neural-receiver":  # Neural receiver
+        elif system == "neural-receiver":  # Neural receiver (proposed, residual-conv)
             self._neural_receiver = NeuralReceiver()
+            self._rg_demapper = ResourceGridDemapper(self._rg, self._sm)
+        elif system == "neural-receiver-fc":  # FC-only ablation (per-subcarrier independent)
+            self._neural_receiver = FCNeuralReceiver(
+                num_rx_ant=ofdm_params['num_rx_ant'],
+                num_ofdm_symbols=ofdm_params['num_ofdm_symbols'],
+                num_subcarriers=ofdm_params['fft_size'],
+                num_bits_per_symbol=ofdm_params['num_bits_per_symbol'],
+            )
             self._rg_demapper = ResourceGridDemapper(self._rg, self._sm)
 
     # @tf.function
@@ -302,7 +311,7 @@ class E2ESystem(Model):
             x_hat, no_eff = self._lmmse_equ([y, h_hat, err_var, no]) # LMMSE equalization
             no_eff_= expand_to_rank(no_eff, tf.rank(x_hat))
             llr = self._demapper([x_hat, no_eff_]) # Demapping
-        elif self._system == "neural-receiver":
+        elif "neural-receiver" in self._system:
             # The neural receiver computes LLRs from the frequency domain received symbols and N0
             y = tf.squeeze(y, axis=1)
             llr = self._neural_receiver([y, no])  # [batch size, num ofdm symbols, num subcarriers, num_bits_per_symbol]

@@ -12,6 +12,7 @@ from sionna.rt import PlanarArray, Receiver, Transmitter, Camera
 from utils.sionna_functions import (load_3d_map, render_scene, configure_antennas)
 from utils.imu_functions import binary_to_imu
 from neural_receiver import E2ESystem
+from plot_style import (plot_receiver_split, plot_receiver_combined, RX_QUANT)
 
 sionna.config.seed = 123
 # Configure which GPU
@@ -54,42 +55,25 @@ def plot_figure(metric='ber'):
     data = data.item()
     for key, value in data.items():
         print('{}: {}'.format(key, value))
-    if metric == 'ber':
-        x_range = np.arange(-5.0, 16.0, 1.0)
-    else:
-        x_range = np.arange(4, 11, 1, dtype=int)
-    
-    plt.figure()
-    
-    plt.semilogy(x_range, data['neural-receiver-2p'], 's-', c=f'C0', label=f'Neural Receiver - 2P')
-    plt.semilogy(x_range, data['neural-receiver-1p'], 's-', c=f'C1', label=f'Neural Receiver - 1P')
-    plt.semilogy(x_range, data['baseline-ls-estimation-2p'], '*--', c=f'C2', label=f'LS-LMMSE Receiver - 2P')
-    plt.semilogy(x_range, data['baseline-ls-estimation-1p'], '*--', c=f'C3', label=f'LS-LMMSE Receiver - 1P')
-    plt.semilogy(x_range, data['baseline-perfect-csi'], 'o--', c=f'C4', label=f'Perfect-CSI Receiver') 
 
     if metric == 'ber':
-        plt.xlabel(r"$E_b/N_0$ (dB)", fontsize=18)
-        plt.ylabel("BER", fontsize=18)
+        # Fig. 6: BER vs Eb/N0 split into (a) 2P | (b) 1P panels.
+        x_range = np.arange(-5.0, 16.0, 1.0)
+        plot_receiver_split(x_range, data,
+                            xlabel=r"$E_b/N_0$ (dB)", ylabel="BER",
+                            out_path='data/figures/ber.pdf', ylim=(1e-6, 1e-1))
     elif metric == 'mse':
-        plt.xlabel("Quantization level (bits)", fontsize=18)
-        plt.ylabel("MSE", fontsize=18)
+        # Fig. 8: reconstruction MSE vs quantization.
+        x_range = np.arange(4, 11, 1, dtype=int)
+        plot_receiver_combined(x_range, data, RX_QUANT,
+                               xlabel="Quantization level (bits)", ylabel="MSE",
+                               out_path='data/figures/mse.pdf')
     else:
-        plt.xlabel("Quantization level (bits)", fontsize=18)
-        plt.ylabel("MPJAE", fontsize=18)
-        
-    plt.xticks(fontsize=15)
-    plt.yticks(fontsize=15)
-    plt.grid(which="both")
-    if metric == 'ber':
-        plt.ylim((1e-6, 1e-1))
-    plt.legend(fontsize=12, framealpha=0.5)
-    plt.tight_layout()
-    if metric == 'ber':
-        plt.savefig('data/figures/ber.pdf')
-    elif metric == 'mse':
-        plt.savefig('data/figures/mse.pdf')
-    else:
-        plt.savefig('data/figures/mpjae.pdf')
+        # Fig. 12: MPJAE vs quantization.
+        x_range = np.arange(4, 11, 1, dtype=int)
+        plot_receiver_combined(x_range, data, RX_QUANT,
+                               xlabel="Quantization level (bits)", ylabel=r"MPJAE ($^\circ$)",
+                               out_path='data/figures/mpjae.pdf')
 
 def generate_channel_impulse_responses(scene, map_name, num_cirs, batch_size_cir, rg, num_tx_ant, num_rx_ant, num_paths, uplink=True):
     max_depth = 5
@@ -295,10 +279,10 @@ def generate_channel_impulse_responses(scene, map_name, num_cirs, batch_size_cir
 
     return a, tau
 
-def mse_simulation(quantization_range, ebnodb_range, ofdm_params, model_params, a, tau):
+def mse_simulation(quantization_range, ebnodb_range, ofdm_params, model_params, a, tau, channel):
     MSE = {}
     
-    for system in ['baseline-perfect-csi','neural-receiver', 'baseline-ls-estimation']: 
+    for system in ['baseline-perfect-csi', 'neural-receiver', 'neural-receiver-fc', 'baseline-ls-estimation']:
         for scenario in ['1p', '2p']:
             if scenario == '1p':
                 ofdm_params['pilot_ofdm_symbol_indices'] = [2]
@@ -314,9 +298,11 @@ def mse_simulation(quantization_range, ebnodb_range, ofdm_params, model_params, 
                     
                     model = E2ESystem(system, ofdm_params, model_params, a, tau, eval_mode=3, gen_data=False)
                     batch_size = model.get_batch_size()
-                    if system == 'neural-receiver':
+                    if system in ('neural-receiver', 'neural-receiver-fc'):
                         model(batch_size, tf.constant(ofdm_params['ebno_db_max'], tf.float32))
-                        model_weights_path = 'data/weights/neural_receiver_weights_{}'.format(scenario)
+                        _base = ('neural_receiver_fc_weights' if system == 'neural-receiver-fc'
+                                 else 'neural_receiver_weights')
+                        model_weights_path = 'data/weights/{}_{}'.format(_base, scenario)
                         with open(model_weights_path, 'rb') as f:
                             weights = pickle.load(f)
                         model.set_weights(weights)
@@ -352,9 +338,14 @@ def mse_simulation(quantization_range, ebnodb_range, ofdm_params, model_params, 
                     print('recovered data: {}'.format(recovered_data[:2, :10]))
                     
                     # save results
-                    np.save('data/imu/ori_imu_{}_{}_{}_{}.npy'.format(system, scenario, ql, ofdm_params['ebno_db_max']), origin_data)
-                    np.save('data/imu/qtz_imu_{}_{}_{}_{}.npy'.format(system, scenario, ql, ofdm_params['ebno_db_max']), quantized_data)
-                    np.save('data/imu/rec_imu_{}_{}_{}_{}.npy'.format(system, scenario, ql, ofdm_params['ebno_db_max']), recovered_data)
+                    if system in ('neural-receiver', 'neural-receiver-fc'):
+                        np.save('data/imu/ori_imu_{}_{}_{}_{}_{}.npy'.format(channel, system, scenario, ql, ofdm_params['ebno_db_max']), origin_data)
+                        np.save('data/imu/qtz_imu_{}_{}_{}_{}_{}.npy'.format(channel, system, scenario, ql, ofdm_params['ebno_db_max']), quantized_data)
+                        np.save('data/imu/rec_imu_{}_{}_{}_{}_{}.npy'.format(channel, system, scenario, ql, ofdm_params['ebno_db_max']), recovered_data)
+                    else:
+                        np.save('data/imu/ori_imu_{}_{}_{}_{}.npy'.format(system, scenario, ql, ofdm_params['ebno_db_max']), origin_data)
+                        np.save('data/imu/qtz_imu_{}_{}_{}_{}.npy'.format(system, scenario, ql, ofdm_params['ebno_db_max']), quantized_data)
+                        np.save('data/imu/rec_imu_{}_{}_{}_{}.npy'.format(system, scenario, ql, ofdm_params['ebno_db_max']), recovered_data)
                     
                     del binary_source, origin_data, quantized_data, recovered_data, b_all, b_hat_all
             
@@ -365,31 +356,19 @@ def mse_simulation(quantization_range, ebnodb_range, ofdm_params, model_params, 
             else:
                 MSE[system] = mse_system
     
-    np.save('data/pltdata/mse.npy', MSE)
+    np.save(f'data/pltdata/mse_{channel}.npy', MSE)
     print('MSE: {}'.format(MSE))    
     
-    plt.figure()
-    # Neural receiver
-    plt.semilogy(quantization_range, MSE['neural-receiver-2p'], 's-', c=f'C0', label=f'Neural Receiver - 2P')
-    plt.semilogy(quantization_range, MSE['neural-receiver-1p'], 's-', c=f'C1', label=f'Neural Receiver - 1P')
-    # Baseline - LS Estimation
-    plt.semilogy(quantization_range, MSE['baseline-ls-estimation-2p'], '*--', c=f'C2', label=f'LS-LMMSE Receiver - 2P')
-    plt.semilogy(quantization_range, MSE['baseline-ls-estimation-1p'], '*--', c=f'C3', label=f'LS-LMMSE Receiver- 1P')
-    # Baseline - Perfect CSI
-    plt.semilogy(quantization_range, MSE['baseline-perfect-csi'], 'o--', c=f'C4', label=f'Baseline-Perfect CSI')
-    plt.xlabel("Quatization level", fontsize=18)
-    plt.ylabel("MSE", fontsize=18)
-    plt.xticks(fontsize=15)
-    plt.yticks(fontsize=15)
-    plt.grid(which="both")
-    plt.legend(fontsize=13)
-    plt.tight_layout()
-    plt.savefig('data/figures/mse.pdf')
+    # Fig. 8: reconstruction MSE vs quantization (shared style, no title).
+    plot_receiver_combined(quantization_range, MSE, RX_QUANT,
+                           xlabel="Quantization level (bits)", ylabel="MSE",
+                           out_path='data/figures/mse.pdf')
         
     print(MSE)
     
 
-def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0, scenario='2p'):
+def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0, scenario='2p', receiver='neural-receiver', 
+                       channel='raytracing'):
     # End-to-end model
     ofdm_params = {
         'num_rx_ant': 16,  # base station
@@ -447,23 +426,17 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0, scenario='2p
             print('tau_{}.shape: {}'.format(map_name, tau.shape))
         sys.exit()
     else:
-        a_dataset_etoile = np.load('data/cirdata/a_dataset_etoile.npy')
-        tau_dataset_etoile = np.load('data/cirdata/tau_dataset_etoile.npy')
-        a_dataset_munich = np.load('data/cirdata/a_dataset_munich.npy')
-        tau_dataset_munich = np.load('data/cirdata/tau_dataset_munich.npy')
-        
-        # Find the minimum shape along each axis
-        min_size = min(a_dataset_etoile.shape[0], a_dataset_munich.shape[0])
-
-        # Crop the datasets
-        a_dataset_etoile_cropped = a_dataset_etoile[:min_size]
-        a_dataset_munich_cropped = a_dataset_munich[:min_size]
-        tau_dataset_etoile_cropped = tau_dataset_etoile[:min_size]
-        tau_dataset_munich_cropped = tau_dataset_munich[:min_size]
-
-        # Now concatenate
-        a = np.concatenate((a_dataset_etoile_cropped, a_dataset_munich_cropped), axis=0)
-        tau = np.concatenate((tau_dataset_etoile_cropped, tau_dataset_munich_cropped), axis=0)
+        if channel == 'raytracing':
+            a_e = np.load('data/cirdata/a_dataset_etoile.npy')
+            tau_e = np.load('data/cirdata/tau_dataset_etoile.npy')
+            a_m = np.load('data/cirdata/a_dataset_munich.npy')
+            tau_m = np.load('data/cirdata/tau_dataset_munich.npy')
+            min_size = min(a_e.shape[0], a_m.shape[0])
+            a = np.concatenate((a_e[:min_size], a_m[:min_size]), axis=0)
+            tau = np.concatenate((tau_e[:min_size], tau_m[:min_size]), axis=0)
+        else:  # 'cdl' or 'awgn'
+            a = np.load('data/cirdata/a_dataset_{}.npy'.format(channel))
+            tau = np.load('data/cirdata/tau_dataset_{}.npy'.format(channel))
         
         # Shuffle the datasets together
         indices = np.arange(a.shape[0])
@@ -482,14 +455,17 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0, scenario='2p
     for key, value in ofdm_params.items():
         print(f"{key}: {value}") 
 
+    nr_base = ('neural_receiver_fc_weights' if receiver == 'neural-receiver-fc'
+               else 'neural_receiver_weights')
+
     if eval_mode == 0 or eval_mode == 1:
-        model = E2ESystem('neural-receiver', ofdm_params, model_params, a, tau, eval_mode=eval_mode, gen_data=gen_data)
+        model = E2ESystem(receiver, ofdm_params, model_params, a, tau, eval_mode=eval_mode, gen_data=gen_data)
         optimizer = tf.keras.optimizers.legacy.Adam()
         if eval_mode == 1:
             # keep training the model from check point
             ebno_db = tf.random.uniform(shape=[model_params['batch_size']], minval=ebno_db_min, maxval=ebno_db_max)
             model(model_params['batch_size'], ebno_db)
-            model_weights_path = 'data/weights/neural_receiver_weights'
+            model_weights_path = 'data/weights/{}_{}'.format(nr_base, scenario)   # (resume)
             with open(model_weights_path, 'rb') as f:
                 weights = pickle.load(f)
             model.set_weights(weights)
@@ -508,7 +484,7 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0, scenario='2p
             if i % 100 == 0:
                 print('Iteration {}/{}  Rate: {:.4f} bit'.format(i, num_epochs, rate.numpy()))
                 weights = model.get_weights()
-                model_weights_path = 'data/weights/neural_receiver_weights_{}'.format(scenario)
+                model_weights_path = 'data/weights/{}_{}'.format(nr_base, scenario)
                 with open(model_weights_path, 'wb') as f:
                     pickle.dump(weights, f)
     else:
@@ -552,37 +528,56 @@ def evaluate_e2e_model(num_epochs=3000, gen_data=True, eval_mode=0, scenario='2p
             model.set_weights(weights)
             ber, bler = sim_ber(model, ebno_dbs, batch_size=model_params['batch_size'], num_target_block_errors=100, max_mc_iter=100, early_stop=True)
             BLER['neural-receiver-1p'] = ber.numpy()
+
+            # ---- FC-only ablation (R5.6): add BER curves if weights exist ----
+            import os as _os
+            for _scn, _pilots in [('2p', [2, 11]), ('1p', [2])]:
+                _wp = 'data/weights/neural_receiver_fc_weights_{}'.format(_scn)
+                if not _os.path.exists(_wp):
+                    print('FC weights {} not found; skipping FC BER.'.format(_wp)); continue
+                ofdm_params['pilot_ofdm_symbol_indices'] = _pilots
+                _m = E2ESystem('neural-receiver-fc', ofdm_params, model_params, a, tau,
+                               eval_mode=eval_mode, gen_data=False)
+                _m(model_params['batch_size'], tf.constant(ebno_db_max, tf.float32))
+                with open(_wp, 'rb') as f:
+                    _m.set_weights(pickle.load(f))
+                _ber, _ = sim_ber(_m, ebno_dbs, batch_size=model_params['batch_size'],
+                                  num_target_block_errors=100, max_mc_iter=100, early_stop=True)
+                BLER['neural-receiver-fc-{}'.format(_scn)] = _ber.numpy()
             
             # LS estimation
             model = E2ESystem('baseline-ls-estimation', ofdm_params, model_params, a, tau, eval_mode=eval_mode, gen_data=False)
             ber, bler = sim_ber(model, ebno_dbs, batch_size=model_params['batch_size'], num_target_block_errors=100, max_mc_iter=100, early_stop=True)
             BLER['baseline-ls-estimation-1p'] = ber.numpy()     
             
-            np.save('data/pltdata/bler.npy', BLER)
+            np.save(f'data/pltdata/bler_{channel}.npy', BLER)
             print('BLER: {}'.format(BLER))
 
-            plt.figure()
-            plt.semilogy(ebno_dbs, BLER['neural-receiver-2p'], 's-', c=f'C0', label=f'Neural Receiver - 2P')
-            plt.semilogy(ebno_dbs, BLER['neural-receiver-1p'], 's-', c=f'C1', label=f'Neural Receiver - 1P')
-            plt.semilogy(ebno_dbs, BLER['baseline-ls-estimation-2p'], '*--', c=f'C2', label=f'LS Estimation - 2P')
-            plt.semilogy(ebno_dbs, BLER['baseline-ls-estimation-1p'], '*--', c=f'C3', label=f'LS Estimation - 1P')
-            plt.semilogy(ebno_dbs, BLER['baseline-perfect-csi'], 'o--', c=f'C4', label=f'Perfect CSI')
-            
-            plt.xlabel(r"$E_b/N_0$ (dB)", fontsize=18)
-            plt.ylabel("BER", fontsize=18)
-            plt.xticks(fontsize=15)
-            plt.yticks(fontsize=15)
-            plt.grid(which="both")
-            # plt.ylim((1e-6, 1.0))
-            plt.legend(fontsize=13)
-            plt.tight_layout()
-            plt.savefig('data/figures/ber.png')
+            # Fig. 6: BER vs Eb/N0 split into (a) 2P | (b) 1P panels.
+            plot_receiver_split(ebno_dbs, BLER,
+                                xlabel=r"$E_b/N_0$ (dB)", ylabel="BER",
+                                out_path='data/figures/ber.png')
             
         elif eval_mode == 3:
             # MSE simulation with customized IMU data
             quantz_range = np.arange(4, 11, 1, dtype=int)
             ebno_db_range = np.arange(5, 10, 5, dtype=float)
-            mse_simulation(quantz_range, ebno_db_range, ofdm_params, model_params, a, tau)
+            mse_simulation(quantz_range, ebno_db_range, ofdm_params, model_params, a, tau, channel)
+        elif eval_mode == 4:
+            # per-scene BER (sketch): build the model once with trained weights, then loop scenes
+            ebno_dbs = np.arange(ebno_db_min, # Min SNR for evaluation
+                                 ebno_db_max, # Max SNR for evaluation
+                                 1.0) # Step
+            for scene in ['munich', 'etoile']:
+                a = np.load('data/cirdata/a_dataset_{}.npy'.format(scene))
+                tau = np.load('data/cirdata/tau_dataset_{}.npy'.format(scene))
+                model = E2ESystem('neural-receiver', ofdm_params, model_params, a, tau, eval_mode=2)
+                model(model_params['batch_size'], tf.constant(ebno_db_max, tf.float32))
+                with open('data/weights/neural_receiver_weights_2p', 'rb') as f:
+                    model.set_weights(pickle.load(f))
+                ber, _ = sim_ber(model, ebno_dbs, batch_size=model_params['batch_size'],
+                                num_target_block_errors=100, max_mc_iter=100, early_stop=True)
+                np.save('data/pltdata/ber_{}.npy'.format(scene), ber.numpy())
 
 if __name__ == '__main__':
     import argparse
@@ -596,10 +591,15 @@ if __name__ == '__main__':
                         default='2p')
     parser.add_argument('--eval_mode', type=int, 
                         help='Training from scratch (0) - Training from check point (1)'
-                        '- BER evaluation (2) - Custom data forward (3)',
+                        '- BER evaluation (2) - Custom data forward (3) - Per-scene BER (4)',
                         default=0
                         )
     parser.add_argument('--plot', type=str, help='Plot figures `ber` and `mse`', default=None)
+    parser.add_argument('--receiver', type=str, default='neural-receiver',
+                        choices=['neural-receiver', 'neural-receiver-fc'],
+                        help='Which OFDM receiver to train/evaluate')
+    parser.add_argument('--channel', type=str, default='raytracing',
+                        choices=['raytracing', 'cdl', 'awgn'])
     args = parser.parse_args()
     
     if args.plot is None:
@@ -607,7 +607,9 @@ if __name__ == '__main__':
             num_epochs=int(args.num_ep), 
             gen_data=bool(args.gen_data), 
             eval_mode=args.eval_mode, 
-            scenario=args.scenario
+            scenario=args.scenario,
+            receiver=args.receiver,
+            channel=args.channel
             )
     else:
         plot_figure(metric=args.plot)
